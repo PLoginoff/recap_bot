@@ -1,3 +1,5 @@
+_Mainly, this bot is for using Sber's free tokens, which is why everything is in Russian_
+
 # Recap Bot
 
 Telegram бот для создания краткого содержания из голосовых сообщений и видео-кружочков.
