@@ -11,4 +11,4 @@ else
 fi
 
 echo "Creating archive..."
-tar -czf recap.tar.gz recap recap.example.yaml
+tar -czf recap_x86.tar.gz recap recap.example.yaml

@@ -5,6 +5,6 @@ recap
 *.state
 
 state.txt
-recap.tar.gz
+*.tar.gz
 
 recap.yaml
