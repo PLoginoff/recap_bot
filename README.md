@@ -1,4 +1,4 @@
-_Mainly, this bot is for using Sber's free tokens, which is why everything is in Russian_
+_Mainly, this bot is for using Sber's free tokens, which is why everything is in Russian. Sber is a Russian cloud provider, and SberSpeech is their top-tier speech-to-text engine for Russian_
 
 # Recap Bot
 
