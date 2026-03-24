@@ -1,0 +1,10 @@
+recap
+
+*.tmp
+*.log
+*.state
+
+state.txt
+recap.tar.gz
+
+recap.yaml
