@@ -9,3 +9,5 @@ require gopkg.in/yaml.v2 v2.4.0
 require github.com/google/uuid v1.6.0
 
 require github.com/creasty/defaults v1.7.0
+
+require github.com/gocarina/gocsv v0.0.0-20240520201108-78e41c74b4b1 // indirect

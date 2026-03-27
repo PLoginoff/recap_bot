@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+
 type OpenRouterModel struct {
 	Name     string        `yaml:"name"`
 	Cooldown time.Duration `yaml:"cooldown"`
@@ -20,8 +22,6 @@ type OpenRouterModel struct {
 type OpenRouterConfig struct {
 	APIKey       string
 	Models       []OpenRouterModel
-	Model        string
-	ModelReserve string
 	SystemPrompt string
 	UserPrompt   string
 }
@@ -53,15 +53,6 @@ func NewOpenRouterClient(config OpenRouterConfig, store *StateStore) *OpenRouter
 	models := make([]OpenRouterModel, 0, len(config.Models))
 	for _, model := range config.Models {
 		models = append(models, normalizeModelConfig(model))
-	}
-
-	if len(models) == 0 {
-		if config.Model != "" {
-			models = append(models, normalizeModelConfig(OpenRouterModel{Name: config.Model}))
-		}
-		if config.ModelReserve != "" {
-			models = append(models, normalizeModelConfig(OpenRouterModel{Name: config.ModelReserve}))
-		}
 	}
 
 	return &OpenRouterClient{
@@ -138,26 +129,16 @@ func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text stri
 	log.Printf("OpenRouter: using model %s", modelName)
 	log.Printf("Text length: %d characters", len(text))
 
-	systemPrompt := c.config.SystemPrompt
-	if systemPrompt == "" {
-		systemPrompt = "Вы - помощник, который создает краткое содержание текста. Нужно сделать сначала краткое содержание спича в одну строчку. Затем, если спич длинный - дополнить развернутый пересказ в трех-семи строчках. Если же спич оригинальный короткий - ограничиться только кратким. Эти два раздела назови как *Кратко* и *Подробнее* выделив звездочками для форматирования и добавив один разрыв"
-	}
-
-	userPrompt := c.config.UserPrompt
-	if userPrompt == "" {
-		userPrompt = "Create a summary of the following text:\n\n%s"
-	}
-
 	reqPayload := Request{
 		Model: modelName,
 		Messages: []Message{
 			{
 				Role:    "system",
-				Content: systemPrompt,
+				Content: c.config.SystemPrompt,
 			},
 			{
 				Role:    "user",
-				Content: fmt.Sprintf(userPrompt, text),
+				Content: fmt.Sprintf(c.config.UserPrompt, text),
 			},
 		},
 	}
@@ -167,7 +148,7 @@ func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text stri
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://openrouter.ai/api/v1/chat/completions", bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openRouterURL, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

@@ -91,10 +91,8 @@ func main() {
 	openrouterConfig := OpenRouterConfig{
 		APIKey:       config.Openrouter.APIKey,
 		Models:       openrouterModels,
-		Model:        config.Openrouter.Model,
-		ModelReserve: config.Openrouter.ModelReserve,
-		SystemPrompt: config.Openrouter.SystemPrompt,
-		UserPrompt:   config.Openrouter.UserPrompt,
+		SystemPrompt: config.Prompts.SystemPrompt,
+		UserPrompt:   config.Prompts.UserPrompt,
 	}
 
 	openrouterClient := NewOpenRouterClient(openrouterConfig, stateStore)

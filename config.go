@@ -29,11 +29,11 @@ type Config struct {
 			Cooldown time.Duration `yaml:"cooldown"`
 			Limit    time.Duration `yaml:"limit"`
 		} `yaml:"models"`
-		Model        string `yaml:"model"`
-		ModelReserve string `yaml:"model_reserve"`
-		SystemPrompt string `yaml:"system_prompt"`
-		UserPrompt   string `yaml:"user_prompt"`
 	} `yaml:"openrouter"`
+	Prompts struct {
+		SystemPrompt string `yaml:"system"`
+		UserPrompt   string `yaml:"user"`
+	} `yaml:"prompts"`
 	Messages    ConfigMessages `yaml:"messages"`
 	NumWorkers  int            `yaml:"num_workers" default:"3"`
 	WaitOnError time.Duration  `yaml:"wait_on_error" default:"3s"`
@@ -49,10 +49,10 @@ type BotConfig struct {
 
 type ConfigMessages struct {
 	Listening      string `yaml:"listening" default:"Listening"`
-	StartMessage   string `yaml:"start_message" default:"Send me a voice message and I'll transcribe it for you!"`
-	ErrorMessage   string `yaml:"error_message" default:"An error occurred while processing your message. Please try again."`
-	FailureMessage string `yaml:"failure_message" default:"Failed to transcribe the audio. Please check the audio quality and try again."`
-	RetryMessage   string `yaml:"retry_message" default:"Retrying..."`
+	StartMessage   string `yaml:"start" default:"Send me a voice message and I'll transcribe it for you!"`
+	ErrorMessage   string `yaml:"error" default:"An error occurred while processing your message. Please try again."`
+	FailureMessage string `yaml:"failure" default:"Failed to transcribe the audio. Please check the audio quality and try again."`
+	RetryMessage   string `yaml:"retry" default:"Retrying..."`
 }
 
 func loadConfig(filename string) (*Config, error) {

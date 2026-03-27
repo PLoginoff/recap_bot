@@ -31,11 +31,11 @@ type TestConfig struct {
 			Cooldown time.Duration `yaml:"cooldown"`
 			Limit    time.Duration `yaml:"limit"`
 		} `yaml:"models"`
-		Model        string `yaml:"model"`
-		ModelReserve string `yaml:"model_reserve"`
+	} `yaml:"openrouter"`
+	Prompts struct {
 		SystemPrompt string `yaml:"system_prompt"`
 		UserPrompt   string `yaml:"user_prompt"`
-	} `yaml:"openrouter"`
+	} `yaml:"prompts"`
 }
 
 // OpenRouter client structures
@@ -163,12 +163,9 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	primaryModel := config.Openrouter.Model
-	if primaryModel == "" && len(config.Openrouter.Models) > 0 {
+	primaryModel := ""
+	if len(config.Openrouter.Models) > 0 {
 		primaryModel = config.Openrouter.Models[0].Name
-	}
-	if primaryModel == "" && config.Openrouter.ModelReserve != "" {
-		primaryModel = config.Openrouter.ModelReserve
 	}
 	if primaryModel == "" {
 		log.Fatalf("No OpenRouter model configured")
@@ -178,8 +175,8 @@ func main() {
 	baseConfig := OpenrouterConfig{
 		APIKey:       config.Openrouter.APIKey,
 		Model:        primaryModel,
-		SystemPrompt: config.Openrouter.SystemPrompt,
-		UserPrompt:   config.Openrouter.UserPrompt,
+		SystemPrompt: config.Prompts.SystemPrompt,
+		UserPrompt:   config.Prompts.UserPrompt,
 	}
 
 	modelsToTest := make([]string, 0, len(config.Openrouter.Models)+2)
@@ -191,17 +188,14 @@ func main() {
 			modelsToTest = append(modelsToTest, model.Name)
 		}
 	}
-	if config.Openrouter.ModelReserve != "" && !containsString(modelsToTest, config.Openrouter.ModelReserve) {
-		modelsToTest = append(modelsToTest, config.Openrouter.ModelReserve)
-	}
 	if len(modelsToTest) == 0 {
 		log.Fatalf("No OpenRouter models available for testing")
 	}
 
 	// Different system prompt variants for testing
 	systemPrompts := map[string]string{}
-	if config.Openrouter.SystemPrompt != "" {
-		systemPrompts["configured"] = config.Openrouter.SystemPrompt
+	if config.Prompts.SystemPrompt != "" {
+		systemPrompts["configured"] = config.Prompts.SystemPrompt
 	} else {
 		systemPrompts["default"] = ""
 	}

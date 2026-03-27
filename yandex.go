@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const yandexSTTURL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?topic=general&lang=ru-RU%s"
+
 type YandexConfig struct {
 	APIKey   string
 	FolderID string
@@ -63,7 +65,7 @@ func (c *YandexClient) Recognize(ctx context.Context, audioData []byte) (string,
 		}
 	}()
 
-	url := fmt.Sprintf("https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?topic=general&lang=ru-RU%s", "")
+	url := fmt.Sprintf(yandexSTTURL, "")
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(audioData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)

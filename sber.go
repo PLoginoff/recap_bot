@@ -19,6 +19,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const sberUploadURL = "https://smartspeech.sber.ru/rest/v1/data:upload"
+
 type SberTokenConfig struct {
 	Name         string        `yaml:"name"`
 	ClientID     string        `yaml:"client_id"`
@@ -347,7 +349,7 @@ func (c *SberClient) uploadAudioData(ctx context.Context, accessToken string, au
 	sum := sha256.Sum256(audioData)
 	log.Printf("Sber: upload payload size=%d bytes, sha256=%s, head=%s", len(audioData), hex.EncodeToString(sum[:]), strings.ToUpper(hex.EncodeToString(preview)))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://smartspeech.sber.ru/rest/v1/data:upload", bytes.NewReader(audioData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sberUploadURL, bytes.NewReader(audioData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create upload request: %w", err)
 	}

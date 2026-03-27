@@ -14,8 +14,10 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
+const telegramAPIURL = "https://api.telegram.org/bot%s/sendMessage"
+
 func (b *Bot) SendMessage(ctx context.Context, chatID int, replyTo int, text string) (int, error) {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", b.token)
+	apiURL := fmt.Sprintf(telegramAPIURL, b.token)
 	data := url.Values{}
 	data.Set("chat_id", strconv.Itoa(chatID))
 	if replyTo != 0 {
