@@ -93,7 +93,7 @@ func (b *Bot) saveDebugAudio(ctx context.Context, task *RecapTask) {
 	}
 
 	timestamp := time.Now().Format("20060102-150405")
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%d-%d-%s", task.ChatID, task.MessageID, timestamp)))
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%s-%s-%s", task.ChatID, task.MessageID, timestamp)))
 	hashStr := hex.EncodeToString(hash[:])[:8]
 
 	debugDir := filepath.Join("debug", task.DebugDir)
@@ -102,7 +102,7 @@ func (b *Bot) saveDebugAudio(ctx context.Context, task *RecapTask) {
 		return
 	}
 
-	filename := fmt.Sprintf("%s-%d-%d-%s.%s", hashStr, task.ChatID, task.MessageID, timestamp, task.DebugExt)
+	filename := fmt.Sprintf("%s-%s-%s-%s.%s", hashStr, task.ChatID, task.MessageID, timestamp, task.DebugExt)
 	filePath := filepath.Join(debugDir, filename)
 
 	if err := os.WriteFile(filePath, task.AudioData, 0644); err != nil {

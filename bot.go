@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
-	"sync"
 	"time"
-
-	telegrambot "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 )
 
 type TaskStatus string
@@ -22,8 +19,9 @@ const (
 )
 
 type RecapTask struct {
-	ChatID          int
-	MessageID       int
+	Messenger       MessengerType
+	ChatID          string
+	MessageID       string
 	FileID          string
 	Status          TaskStatus
 	Wait            time.Duration
@@ -32,7 +30,7 @@ type RecapTask struct {
 	Summary         string
 	ErrorCount      int
 	IsVideoNote     bool
-	StatusMessageID int
+	StatusMessageID string
 	StatusText      string
 	DebugDir        string
 	DebugExt        string
@@ -44,22 +42,18 @@ type RecapTask struct {
 
 
 type Bot struct {
-	token          string
+	messengers      map[MessengerType]MessengerClient
 	recognizer     SpeechRecognizer
 	openrouter     *OpenRouterClient
 	httpClient     *http.Client
 	downloadClient *http.Client // separate client for file downloads
 	taskQueue      chan<- *RecapTask
-	userRequests   map[int64][]time.Time
-	mu             sync.Mutex
-	rateLimit      int
-	rateLimitTime  time.Duration
 	ffmpegPath     string
 	saveDebugMedia bool
 	messages       ConfigMessages
 }
 
-func NewBot(config BotConfig, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, taskQueue chan<- *RecapTask, ffmpegPath string, saveDebugMedia bool) (*Bot, error) {
+func NewBot(messengers map[MessengerType]MessengerClient, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, taskQueue chan<- *RecapTask, ffmpegPath string, saveDebugMedia bool, messages ConfigMessages) (*Bot, error) {
 	httpClient := &http.Client{
 		Timeout: 60 * time.Second,
 	}
@@ -69,186 +63,124 @@ func NewBot(config BotConfig, recognizer SpeechRecognizer, openrouterClient *Ope
 	}
 
 	return &Bot{
-		token:          config.TelegramToken,
+		messengers:      messengers,
 		recognizer:     recognizer,
 		openrouter:     openrouterClient,
 		httpClient:     httpClient,
 		downloadClient: downloadClient,
 		taskQueue:      taskQueue,
-		userRequests:   make(map[int64][]time.Time),
-		rateLimit:      10,
-		rateLimitTime:  time.Hour,
 		ffmpegPath:     ffmpegPath,
 		saveDebugMedia: saveDebugMedia,
-		messages:       config.Messages,
+		messages:       messages,
 	}, nil
 }
 
 func (b *Bot) Start(ctx context.Context) {
-	opts := []telegrambot.Option{
-		telegrambot.WithMessageTextHandler("/start", telegrambot.MatchTypeExact, b.handleStart),
-		telegrambot.WithDefaultHandler(b.handleAllMessages),
+	log.Printf("Starting bot with %d messengers...", len(b.messengers))
+	
+	for _, messenger := range b.messengers {
+		go func(m MessengerClient) {
+			if err := m.Start(ctx); err != nil {
+				log.Printf("Messenger client error: %v", err)
+			}
+		}(messenger)
 	}
-
-	tgBot := telegrambot.New(b.token, opts...)
-
-	log.Printf("Starting Telegram bot...")
-	go func() {
-		tgBot.Start(ctx)
-	}()
 
 	<-ctx.Done()
 	log.Printf("Context cancelled, stopping bot: %v", ctx.Err())
 }
 
-func (b *Bot) handleStart(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
-	if _, err := b.SendMessage(ctx, update.Message.Chat.ID, update.Message.ID, b.messages.StartMessage); err != nil {
-		log.Printf("Failed to send start message: %v", err)
+func (b *Bot) getMessenger(messengerType MessengerType) (MessengerClient, error) {
+	messenger, ok := b.messengers[messengerType]
+	if !ok {
+		return nil, fmt.Errorf("no messenger found for type %s", messengerType)
 	}
+	return messenger, nil
 }
 
-func (b *Bot) handleAllMessages(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
-	if update.Message != nil && update.Message.Voice != nil {
-		b.handleVoiceMessage(ctx, bot, update)
-		return
+func (b *Bot) SendMessage(ctx context.Context, chatID, replyTo, text string) (string, error) {
+	// For direct calls, use Telegram as default
+	messenger, err := b.getMessenger(MessengerTelegram)
+	if err != nil {
+		return "", fmt.Errorf("no messengers available")
 	}
-
-	if update.Message != nil && update.Message.VideoNote != nil {
-		b.handleVideoNote(ctx, bot, update)
-		return
-	}
-
-	if update.InlineQuery != nil {
-		b.handleInlineQuery(ctx, bot, update)
-		return
-	}
+	return messenger.SendMessage(ctx, chatID, replyTo, text)
 }
 
-func (b *Bot) handleVoiceMessage(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
-	voice := update.Message.Voice
-	if voice == nil {
-		return
+func (b *Bot) SendMessageWithMessenger(ctx context.Context, messengerType MessengerType, chatID, replyTo, text string) (string, error) {
+	messenger, err := b.getMessenger(messengerType)
+	if err != nil {
+		return "", err
 	}
-
-	userID := update.Message.From.ID
-
-	if !b.isAllowed(int64(userID)) {
-		log.Printf("Rate limit exceeded for user %d", userID)
-		return
-	}
-
-	task := &RecapTask{
-		ChatID:      update.Message.Chat.ID,
-		MessageID:   update.Message.ID,
-		FileID:      voice.FileID,
-		Status:      StatusDownload,
-		IsVideoNote: false,
-	}
-	if b.saveDebugMedia {
-		task.DebugDir = "voice_audio"
-		task.DebugExt = "ogg"
-		task.RawDebugDir = "voice_audio"
-		task.RawDebugExt = "ogg"
-	}
-
-	statusText := b.messages.Listening
-	if messageID, err := b.SendMessage(ctx, task.ChatID, task.MessageID, statusText); err != nil {
-		log.Printf("Failed to send thinking message: %v", err)
-	} else {
-		task.StatusMessageID = messageID
-		task.StatusText = statusText
-	}
-
-	b.taskQueue <- task
+	return messenger.SendMessage(ctx, chatID, replyTo, text)
 }
 
-func (b *Bot) handleVideoNote(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
-	video := update.Message.VideoNote
-	if video == nil {
-		return
+func (b *Bot) SendMessageForTask(ctx context.Context, task *RecapTask, text string) (string, error) {
+	messenger, err := b.getMessenger(task.Messenger)
+	if err != nil {
+		return "", err
 	}
-
-	userID := update.Message.From.ID
-
-	if !b.isAllowed(int64(userID)) {
-		log.Printf("Rate limit exceeded for user %d", userID)
-		return
-	}
-
-	task := &RecapTask{
-		ChatID:      update.Message.Chat.ID,
-		MessageID:   update.Message.ID,
-		FileID:      video.FileID,
-		Status:      StatusDownload,
-		IsVideoNote: true,
-	}
-	if b.saveDebugMedia {
-		task.DebugDir = "video_note_audio"
-		task.DebugExt = "ogg"
-		task.RawDebugDir = "video_note_raw"
-		task.RawDebugExt = "mp4"
-	}
-
-	statusText := b.messages.Listening
-	if messageID, err := b.SendMessage(ctx, task.ChatID, task.MessageID, statusText); err != nil {
-		log.Printf("Failed to send thinking message for video note: %v", err)
-	} else {
-		task.StatusMessageID = messageID
-		task.StatusText = statusText
-	}
-
-	b.taskQueue <- task
+	return messenger.SendMessage(ctx, task.ChatID, task.MessageID, text)
 }
 
-func (b *Bot) handleInlineQuery(ctx context.Context, bBot *telegrambot.Bot, update *models.Update) {
-	query := update.InlineQuery.Query
-	if query == "" {
-		return
+func (b *Bot) UpdateMessage(ctx context.Context, chatID, messageID, text string) error {
+	// For direct calls, use Telegram as default
+	messenger, err := b.getMessenger(MessengerTelegram)
+	if err != nil {
+		return fmt.Errorf("no messengers available")
 	}
-
-	userID := update.InlineQuery.From.ID
-
-	if !b.isAllowed(int64(userID)) {
-		log.Printf("Rate limit exceeded for user %d", userID)
-		return
-	}
-
-	task := &RecapTask{
-		ChatID:      0, // Inline queries don't have a chat
-		MessageID:   0,
-		FileID:      "",
-		Status:      StatusRecap,
-		Wait:        0,
-		AudioData:   nil,
-		Text:        query,
-		IsVideoNote: false,
-	}
-
-	b.taskQueue <- task
+	return messenger.UpdateMessage(ctx, chatID, messageID, text)
 }
 
-func (b *Bot) isAllowed(userID int64) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *Bot) UpdateMessageWithMessenger(ctx context.Context, messengerType MessengerType, chatID, messageID, text string) error {
+	messenger, err := b.getMessenger(messengerType)
+	if err != nil {
+		return err
+	}
+	return messenger.UpdateMessage(ctx, chatID, messageID, text)
+}
 
-	now := time.Now()
-	requests := b.userRequests[userID]
+func (b *Bot) UpdateMessageForTask(ctx context.Context, task *RecapTask, text string) error {
+	messenger, err := b.getMessenger(task.Messenger)
+	if err != nil {
+		return err
+	}
+	return messenger.UpdateMessage(ctx, task.ChatID, task.StatusMessageID, text)
+}
 
-	// Remove old requests
-	var recentRequests []time.Time
-	for _, t := range requests {
-		if now.Sub(t) < b.rateLimitTime {
-			recentRequests = append(recentRequests, t)
-		}
+func (b *Bot) DownloadFile(ctx context.Context, filePath string) ([]byte, error) {
+	// For direct calls, use Telegram as default
+	messenger, err := b.getMessenger(MessengerTelegram)
+	if err != nil {
+		return nil, fmt.Errorf("no messengers available")
+	}
+	_, data, err := messenger.DownloadFile(ctx, filePath)
+	return data, err
+}
+
+func (b *Bot) GetFile(ctx context.Context, fileID string) (*FileInfo, error) {
+	// For direct calls, use Telegram as default
+	messenger, err := b.getMessenger(MessengerTelegram)
+	if err != nil {
+		return nil, fmt.Errorf("no messengers available")
+	}
+	return messenger.GetFile(ctx, fileID)
+}
+
+func (b *Bot) DownloadFileForTask(ctx context.Context, task *RecapTask) (string, []byte, error) {
+	messenger, err := b.getMessenger(task.Messenger)
+	if err != nil {
+		return "", nil, err
 	}
 
-	if len(recentRequests) >= b.rateLimit {
-		return false
+	// Get file info first
+	fileInfo, err := messenger.GetFile(ctx, task.FileID)
+	if err != nil {
+		return "", nil, err
 	}
 
-	recentRequests = append(recentRequests, now)
-	b.userRequests[userID] = recentRequests
-	return true
+	// Download file using filePath
+	return messenger.DownloadFile(ctx, fileInfo.FilePath)
 }
 
 func (b *Bot) Recognize(ctx context.Context, audioData []byte) (string, error) {
@@ -259,16 +191,27 @@ func (b *Bot) Summarize(ctx context.Context, text string) (string, error) {
 	return b.openrouter.Summarize(ctx, text)
 }
 
+func (b *Bot) addDotToStatus(ctx context.Context, task *RecapTask) {
+	if task.StatusMessageID != "" {
+		newStatus := task.StatusText + "."
+		if err := b.UpdateMessageForTask(ctx, task, newStatus); err != nil {
+			log.Printf("Failed to add dot to status message: %v", err)
+		} else {
+			task.StatusText = newStatus
+		}
+	}
+}
+
 func (b *Bot) notifyFailure(ctx context.Context, task *RecapTask) {
-	if task.StatusMessageID != 0 {
-		if err := b.UpdateMessage(ctx, task.ChatID, task.StatusMessageID, b.messages.FailureMessage); err != nil {
+	if task.StatusMessageID != "" {
+		if err := b.UpdateMessageForTask(ctx, task, b.messages.FailureMessage); err != nil {
 			log.Printf("Failed to update failure message: %v", err)
-			if _, sendErr := b.SendMessage(ctx, task.ChatID, task.MessageID, b.messages.FailureMessage); sendErr != nil {
+			if _, sendErr := b.SendMessageForTask(ctx, task, b.messages.FailureMessage); sendErr != nil {
 				log.Printf("Failed to send failure message: %v", sendErr)
 			}
 		}
 	} else {
-		if _, err := b.SendMessage(ctx, task.ChatID, task.MessageID, b.messages.FailureMessage); err != nil {
+		if _, err := b.SendMessageForTask(ctx, task, b.messages.FailureMessage); err != nil {
 			log.Printf("Failed to send failure message: %v", err)
 		}
 	}

@@ -9,10 +9,13 @@ import (
 )
 
 type Config struct {
-	Recognizer  string `yaml:"recognizer" default:"sber"`
-	Telegram  struct {
+	Recognizer    string           `yaml:"recognizer" default:"sber"`
+	Telegram      struct {
 		Token string `yaml:"token"`
 	} `yaml:"telegram"`
+	Max           struct {
+		Token string `yaml:"token"`
+	} `yaml:"max"`
 	Sber struct {
 		Tokens []struct {
 			Name         string        `yaml:"name"`
@@ -22,29 +25,31 @@ type Config struct {
 			Limit        time.Duration `yaml:"limit"`
 		} `yaml:"tokens"`
 	} `yaml:"sber"`
-	Openrouter struct {
-		APIKey string `yaml:"api_key"`
-		Models []struct {
-			Name     string        `yaml:"name"`
-			Cooldown time.Duration `yaml:"cooldown"`
-			Limit    time.Duration `yaml:"limit"`
-		} `yaml:"models"`
-	} `yaml:"openrouter"`
+	Openrouter    ConfigOpenrouter  `yaml:"openrouter"`
+	Prompts       ConfigPrompts     `yaml:"prompts"`
+	Messages      ConfigMessages    `yaml:"messages"`
+	RateLimit     ConfigRateLimit   `yaml:"rate_limit"`
+	NumWorkers    int               `yaml:"num_workers" default:"2"`
+	WaitOnError   time.Duration     `yaml:"wait_on_error" default:"3s"`
+	FFmpegPath    string            `yaml:"ffmpeg_path"`
+	SaveDebugMedia bool             `yaml:"save_debug_media" default:"false"`
+	StateFile     string            `yaml:"state_file"`
+}
+
+type ConfigOpenrouter struct {
+	APIKey string `yaml:"api_key"`
+	Models []struct {
+		Name     string        `yaml:"name"`
+		Cooldown time.Duration `yaml:"cooldown"`
+		Limit    time.Duration `yaml:"limit"`
+	} `yaml:"models"`
+}
+
+type ConfigPrompts struct {
 	Prompts struct {
 		SystemPrompt string `yaml:"system"`
 		UserPrompt   string `yaml:"user"`
 	} `yaml:"prompts"`
-	Messages    ConfigMessages `yaml:"messages"`
-	NumWorkers  int            `yaml:"num_workers" default:"3"`
-	WaitOnError time.Duration  `yaml:"wait_on_error" default:"3s"`
-	FFmpegPath     string `yaml:"ffmpeg_path" default:"ffmpeg"`
-	SaveDebugMedia bool   `yaml:"save_debug_media"`
-	StateFile string `yaml:"state_file" default:"recap.state"`
-}
-
-type BotConfig struct {
-	TelegramToken string
-	Messages     ConfigMessages
 }
 
 type ConfigMessages struct {
@@ -53,6 +58,11 @@ type ConfigMessages struct {
 	ErrorMessage   string `yaml:"error" default:"An error occurred while processing your message. Please try again."`
 	FailureMessage string `yaml:"failure" default:"Failed to transcribe the audio. Please check the audio quality and try again."`
 	RetryMessage   string `yaml:"retry" default:"Retrying..."`
+}
+
+type ConfigRateLimit struct {
+	MaxRequests int           `yaml:"max_requests" default:"10"`
+	TimeWindow  time.Duration `yaml:"time_window" default:"1h"`
 }
 
 func loadConfig(filename string) (*Config, error) {

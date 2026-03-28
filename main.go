@@ -33,12 +33,20 @@ func main() {
 	// Create task channel
 	taskQueue := make(chan *RecapTask, 100)
 
+	// Create shared rate limiter from config
+	rateLimiter := NewDefaultRateLimiter(config.RateLimit.MaxRequests, config.RateLimit.TimeWindow)
+
+	// Create Telegram messenger client
+	telegramMessenger := NewTelegramMessenger(config.Telegram.Token, taskQueue, rateLimiter, config.SaveDebugMedia, config.Messages)
+
+	// Create Max messenger client
+	var maxMessenger *MaxMessenger
+	if config.Max.Token != "" {
+		maxMessenger = NewMaxMessenger(config.Max.Token, taskQueue, rateLimiter, config.Messages)
+	}
+
 	// Create bot
 	log.Printf("Read token: [%s]", config.Telegram.Token)
-	botConfig := BotConfig{
-		TelegramToken: config.Telegram.Token,
-		Messages:     config.Messages,
-	}
 
 	statePath := config.StateFile
 	if statePath == "" {
@@ -91,13 +99,20 @@ func main() {
 	openrouterConfig := OpenRouterConfig{
 		APIKey:       config.Openrouter.APIKey,
 		Models:       openrouterModels,
-		SystemPrompt: config.Prompts.SystemPrompt,
-		UserPrompt:   config.Prompts.UserPrompt,
+		SystemPrompt: config.Prompts.Prompts.SystemPrompt,
+		UserPrompt:   config.Prompts.Prompts.UserPrompt,
 	}
 
 	openrouterClient := NewOpenRouterClient(openrouterConfig, stateStore)
 
-	tgBot, err := NewBot(botConfig, recognizer, openrouterClient, taskQueue, config.FFmpegPath, config.SaveDebugMedia)
+	// Create bot with messenger clients
+	messengers := map[MessengerType]MessengerClient{
+		MessengerTelegram: telegramMessenger,
+	}
+	if maxMessenger != nil {
+		messengers[MessengerMax] = maxMessenger
+	}
+	bot, err := NewBot(messengers, recognizer, openrouterClient, taskQueue, config.FFmpegPath, config.SaveDebugMedia, config.Messages)
 	if err != nil {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
@@ -110,12 +125,12 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < config.NumWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, &wg, i, taskQueue, tgBot, config.WaitOnError, config.Messages.RetryMessage, loggers)
+		go worker(ctx, &wg, i, taskQueue, bot, config.WaitOnError, config.Messages.RetryMessage, loggers)
 	}
 
 	// Start bot
 	log.Println("Starting bot...")
-	tgBot.Start(ctx)
+	bot.Start(ctx)
 
 	// Wait for workers to finish
 	wg.Wait()

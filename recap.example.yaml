@@ -1,6 +1,10 @@
 telegram:
   token: "YOUR_TELEGRAM_BOT_TOKEN"
 
+# Max messenger is optional - leave empty if not using
+# max:
+#   token: "YOUR_MAX_BOT_TOKEN"
+
 sber:
   tokens:
     - name: "sber-primary"
@@ -45,6 +49,10 @@ messages:
   error: Произошла ошибка при обработке голосового сообщения. Попробуйте еще раз
   failure: 😞 Не удалось обработать сообщение. Попробуй, пожалуйста, ещё раз позже
   retry: 🤔 Пока не сдаюсь, ещё чуть-чуть
+
+rate_limit:
+  max_requests: 10
+  time_window: 1h
 
 num_workers: 5
 wait_on_error: 3s

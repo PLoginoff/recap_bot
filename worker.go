@@ -28,20 +28,14 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, tasks chan *RecapTa
 			}
 
 			startTime := time.Now()
-			loggers.Status.Printf("Worker %d: Processing task for message %d, status %s", id, task.MessageID, task.Status)
+			loggers.Status.Printf("Worker %d: Processing task for message %s, status %s", id, task.MessageID, task.Status)
 
 			var err error
 			switch task.Status {
 			case StatusDownload:
 				// Download file and convert if needed (one stage)
 				if task.AudioData == nil {
-					file, errGetFile := b.GetFile(ctx, task.FileID)
-					if errGetFile != nil {
-						err = errGetFile
-						loggers.Error.Printf("Worker %d: Failed to get file info: %v", id, err)
-						break
-					}
-					task.AudioData, err = b.DownloadFile(ctx, file.FilePath)
+					_, task.AudioData, err = b.DownloadFileForTask(ctx, task)
 					if err != nil {
 						loggers.Error.Printf("Worker %d: Failed to download file: %v", id, err)
 						break
@@ -95,7 +89,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, tasks chan *RecapTa
 					formattedSummary = fmt.Sprintf("<blockquote expandable>%s</blockquote>", safeSummary)
 				}
 				
-				if err := b.UpdateMessage(ctx, task.ChatID, task.StatusMessageID, formattedSummary); err != nil {
+				if err := b.UpdateMessageForTask(ctx, task, formattedSummary); err != nil {
 					loggers.Error.Printf("Worker %d: Failed to update message: %v", id, err)
 					break
 				}
@@ -118,16 +112,16 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, tasks chan *RecapTa
 
 				var tempErr sberTemporaryError
 				if errors.As(err, &tempErr) {
-					loggers.Status.Printf("Worker %d: Temporary Sber error for message %d: %v", id, task.MessageID, err)
+					loggers.Status.Printf("Worker %d: Temporary Sber error for message %s: %v", id, task.MessageID, err)
 					applyRetryBackoff(ctx, b, task, waitOnError, retryMessage, id)
 					tasks <- task
 					continue
 				}
 
-				loggers.Error.Printf("Worker %d: Error processing task for message %d, status %s: %v", id, task.MessageID, task.Status, err)
+				loggers.Error.Printf("Worker %d: Error processing task for message %s, status %s: %v", id, task.MessageID, task.Status, err)
 				task.ErrorCount++
 				if task.ErrorCount >= maxErrors {
-					loggers.Error.Printf("Worker %d: Reached max retries for message %d", id, task.MessageID)
+					loggers.Error.Printf("Worker %d: Reached max retries for message %s", id, task.MessageID)
 					b.notifyFailure(ctx, task)
 					continue
 				}
@@ -144,7 +138,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, tasks chan *RecapTa
 				}
 			}
 
-			loggers.Status.Printf("Worker %d: Finished task for message %d, status %s, duration %v", id, task.MessageID, task.Status, time.Since(startTime))
+			loggers.Status.Printf("Worker %d: Finished task for message %s, status %s, duration %v", id, task.MessageID, task.Status, time.Since(startTime))
 
 		case <-ctx.Done():
 			log.Printf("Worker %d stopping", id)
@@ -163,9 +157,9 @@ func retryThinkingMessage(attempt int, retryMessage string) string {
 func applyRetryBackoff(ctx context.Context, b *Bot, task *RecapTask, waitOnError time.Duration, retryMessage string, workerID int) {
 	task.ErrorCount++
 	task.Wait = waitOnError * time.Duration(task.ErrorCount)
-	if task.StatusMessageID != 0 {
+	if task.StatusMessageID != "" {
 		thinking := retryThinkingMessage(task.ErrorCount, retryMessage)
-		if updateErr := b.UpdateMessage(ctx, task.ChatID, task.StatusMessageID, thinking); updateErr != nil {
+		if updateErr := b.UpdateMessageForTask(ctx, task, thinking); updateErr != nil {
 			log.Printf("Worker %d: Failed to refresh thinking message: %v", workerID, updateErr)
 		}
 	}
