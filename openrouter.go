@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+const openrouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
 type OpenRouterModel struct {
 	Name     string        `yaml:"name"`
@@ -73,7 +73,7 @@ func normalizeModelConfig(cfg OpenRouterModel) OpenRouterModel {
 	return result
 }
 
-func (c *OpenRouterClient) Summarize(ctx context.Context, text string) (string, error) {
+func (c *OpenRouterClient) Summarize(ctx context.Context, text string, prompt string) (string, error) {
 	log.Printf("Starting summarization, %d models configured", len(c.models))
 	if len(c.models) == 0 {
 		return "", fmt.Errorf("no OpenRouter models configured")
@@ -81,7 +81,7 @@ func (c *OpenRouterClient) Summarize(ctx context.Context, text string) (string, 
 
 	var lastErr error
 	for _, model := range c.models {
-		result, err := c.tryModel(ctx, model, text)
+		result, err := c.tryModel(ctx, model, text, prompt)
 		if err == nil {
 			return result, nil
 		}
@@ -96,7 +96,7 @@ func (c *OpenRouterClient) Summarize(ctx context.Context, text string) (string, 
 	return "", fmt.Errorf("all OpenRouter models failed: %w", lastErr)
 }
 
-func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, text string) (string, error) {
+func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, text string, systemPrompt string) (string, error) {
 	defaults := ResourceDefaults{
 		Cooldown: model.Cooldown,
 	}
@@ -113,7 +113,7 @@ func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, 
 	}
 
 	start := time.Now()
-	result, err := c.invokeModel(ctx, model.Name, text)
+	result, err := c.invokeModel(ctx, model.Name, text, systemPrompt)
 	usage := time.Since(start)
 
 	if c.store != nil {
@@ -125,16 +125,23 @@ func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, 
 	return result, err
 }
 
-func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text string) (string, error) {
+func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text string, prompt string) (string, error) {
 	log.Printf("OpenRouter: using model %s", modelName)
 	log.Printf("Text length: %d characters", len(text))
+
+	// Fallback to global prompt if empty
+	if prompt == "" {
+		prompt = c.config.SystemPrompt
+	}
+
+	log.Printf("Prompt: %s", prompt)
 
 	reqPayload := Request{
 		Model: modelName,
 		Messages: []Message{
 			{
 				Role:    "system",
-				Content: c.config.SystemPrompt,
+				Content: prompt,
 			},
 			{
 				Role:    "user",
@@ -148,7 +155,7 @@ func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text stri
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openRouterURL, bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openrouterURL, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

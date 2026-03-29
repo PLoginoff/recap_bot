@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"time"
 
@@ -51,7 +52,7 @@ func (s *StateStore) saveWorker() {
 
 func (s *StateStore) load() error {
 	s.data = make(map[string]ResourceStatus)
-	
+
 	file, err := os.Open(s.path)
 	if err != nil {
 		return nil
@@ -70,7 +71,11 @@ func (s *StateStore) load() error {
 }
 
 func (s *StateStore) save() {
-	file, _ := os.Create(s.path)
+	file, err := os.Create(s.path)
+	if err != nil {
+		log.Printf("Failed to create state file: %v", err)
+		return
+	}
 	defer file.Close()
 
 	var statuses []ResourceStatus
@@ -78,7 +83,9 @@ func (s *StateStore) save() {
 		statuses = append(statuses, status)
 	}
 
-	_ = yaml.NewEncoder(file).Encode(statuses)
+	if err := yaml.NewEncoder(file).Encode(statuses); err != nil {
+		log.Printf("Failed to encode state to file: %v", err)
+	}
 }
 
 func (s *StateStore) triggerSave() {

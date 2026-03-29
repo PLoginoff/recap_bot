@@ -7,4 +7,6 @@ recap
 state.txt
 *.tar.gz
 
+notes.md
+
 recap.yaml

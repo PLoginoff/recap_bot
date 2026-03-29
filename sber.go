@@ -20,6 +20,13 @@ import (
 )
 
 const sberUploadURL = "https://smartspeech.sber.ru/rest/v1/data:upload"
+const sberAuthURL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+const sberAsyncRecognizeURL = "https://smartspeech.sber.ru/rest/v1/speech:async_recognize"
+const sberTaskStatusURL = "https://smartspeech.sber.ru/rest/v1/task:get"
+const sberDownloadURL = "https://smartspeech.sber.ru/rest/v1/data:download"
+
+// Skip TLS verification for Sber API (required for self-signed certificates)
+const sberSkipTLSVerify = true
 
 type SberTokenConfig struct {
 	Name         string        `yaml:"name"`
@@ -105,7 +112,7 @@ func NewSberClient(config SberConfig, store *StateStore) *SberClient {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: sberSkipTLSVerify},
 	}
 
 	return &SberClient{
@@ -289,7 +296,7 @@ func (c *SberClient) authenticate(ctx context.Context, token SberTokenConfig) (s
 
 	payload := strings.NewReader("scope=SALUTE_SPEECH_PERS")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://ngw.devices.sberbank.ru:9443/api/v2/oauth", payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sberAuthURL, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create auth request: %w", err)
 	}
@@ -402,7 +409,7 @@ func (c *SberClient) startAsyncRecognition(ctx context.Context, accessToken, fil
 		return "", fmt.Errorf("failed to marshal async recognition request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://smartspeech.sber.ru/rest/v1/speech:async_recognize", bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sberAsyncRecognizeURL, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create async recognition request: %w", err)
 	}
@@ -463,7 +470,7 @@ func (c *SberClient) waitForResult(ctx context.Context, accessToken, taskID stri
 }
 
 func (c *SberClient) checkTaskStatus(ctx context.Context, accessToken, taskID string) (string, error) {
-	url := fmt.Sprintf("https://smartspeech.sber.ru/rest/v1/task:get?id=%s", taskID)
+	url := fmt.Sprintf("%s?id=%s", sberTaskStatusURL, taskID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task status request: %w", err)
@@ -508,7 +515,11 @@ func (c *SberClient) checkTaskStatus(ctx context.Context, accessToken, taskID st
 		return "", fmt.Errorf("sber task error (%s): %s", detail, preview)
 	}
 
-	if status.Result.Status == "DONE" && status.Result.ResponseFileID != "" {
+	if status.Result.Status == "DONE" {
+		if status.Result.ResponseFileID == "" {
+			log.Printf("Sber: task %s completed but response_file_id is empty", taskID)
+			return "", fmt.Errorf("empty recognition result from Sber")
+		}
 		log.Printf("Sber: task %s completed, file id %s", taskID, status.Result.ResponseFileID)
 		return status.Result.ResponseFileID, nil
 	}
@@ -517,7 +528,7 @@ func (c *SberClient) checkTaskStatus(ctx context.Context, accessToken, taskID st
 }
 
 func (c *SberClient) getResult(ctx context.Context, accessToken, fileID string) (string, error) {
-	url := fmt.Sprintf("https://smartspeech.sber.ru/rest/v1/data:download?response_file_id=%s", fileID)
+	url := fmt.Sprintf("%s?response_file_id=%s", sberDownloadURL, fileID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create download request: %w", err)
@@ -541,6 +552,8 @@ func (c *SberClient) getResult(ctx context.Context, accessToken, fileID string) 
 		return "", fmt.Errorf("sber download error (%s): %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
+	log.Printf("Sber: getResult response for file %s: %s", fileID, string(body))
+
 	var results []sberSpeechResult
 	if err := json.Unmarshal(body, &results); err != nil {
 		return "", fmt.Errorf("failed to unmarshal download response: %w", err)
@@ -556,6 +569,7 @@ func (c *SberClient) getResult(ctx context.Context, accessToken, fileID string) 
 	}
 
 	if len(normalized) == 0 {
+		log.Printf("Sber: no normalized text found in results for file %s", fileID)
 		return "", errors.New("empty recognition result from Sber")
 	}
 

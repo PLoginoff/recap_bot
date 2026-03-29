@@ -31,22 +31,33 @@ func main() {
 	}
 
 	// Create task channel
-	taskQueue := make(chan *RecapTask, 100)
+	taskQueue := make(chan *Task, 100)
 
 	// Create shared rate limiter from config
 	rateLimiter := NewDefaultRateLimiter(config.RateLimit.MaxRequests, config.RateLimit.TimeWindow)
 
-	// Create Telegram messenger client
-	telegramMessenger := NewTelegramMessenger(config.Telegram.Token, taskQueue, rateLimiter, config.SaveDebugMedia, config.Messages)
+	// Create messenger clients from config
+	bots := make(map[string]MessengerClient)
 
-	// Create Max messenger client
-	var maxMessenger *MaxMessenger
-	if config.Max.Token != "" {
-		maxMessenger = NewMaxMessenger(config.Max.Token, taskQueue, rateLimiter, config.Messages)
+	for botID, botConfig := range config.Bots {
+		switch botConfig.Messenger {
+		case MessengerTelegram:
+			telegramMessenger := NewTelegramMessenger(botID, botConfig, taskQueue, rateLimiter, config.Messages)
+			bots[botID] = telegramMessenger
+			log.Printf("Configured Telegram bot: %s", botConfig.ID)
+
+		case MessengerMax:
+			maxMessenger := NewMaxMessenger(botID, botConfig, taskQueue, rateLimiter, config.Messages)
+			bots[botID] = maxMessenger
+			log.Printf("Configured Max bot: %s", botConfig.ID)
+
+		default:
+			log.Printf("Unknown messenger type: %s", botConfig.Messenger)
+		}
 	}
 
-	// Create bot
-	log.Printf("Read token: [%s]", config.Telegram.Token)
+	// Create hub
+	log.Printf("Configured %d bots", len(config.Bots))
 
 	statePath := config.StateFile
 	if statePath == "" {
@@ -99,22 +110,16 @@ func main() {
 	openrouterConfig := OpenRouterConfig{
 		APIKey:       config.Openrouter.APIKey,
 		Models:       openrouterModels,
-		SystemPrompt: config.Prompts.Prompts.SystemPrompt,
-		UserPrompt:   config.Prompts.Prompts.UserPrompt,
+		SystemPrompt: config.Prompts.SystemPrompt,
+		UserPrompt:   config.Prompts.UserPrompt,
 	}
 
 	openrouterClient := NewOpenRouterClient(openrouterConfig, stateStore)
 
-	// Create bot with messenger clients
-	messengers := map[MessengerType]MessengerClient{
-		MessengerTelegram: telegramMessenger,
-	}
-	if maxMessenger != nil {
-		messengers[MessengerMax] = maxMessenger
-	}
-	bot, err := NewBot(messengers, recognizer, openrouterClient, taskQueue, config.FFmpegPath, config.SaveDebugMedia, config.Messages)
+	// Create hub
+	hub, err := NewHub(bots, config.Bots, recognizer, openrouterClient, taskQueue, config.FFmpegPath, config.SaveDebugMedia, config.Messages)
 	if err != nil {
-		log.Fatalf("Failed to create bot: %v", err)
+		log.Fatalf("Failed to create hub: %v", err)
 	}
 
 	// Create context for graceful shutdown
@@ -125,14 +130,14 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < config.NumWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, &wg, i, taskQueue, bot, config.WaitOnError, config.Messages.RetryMessage, loggers)
+		go worker(ctx, &wg, i, taskQueue, hub, config.WaitOnError, config.Messages.RetryMessage, loggers)
 	}
 
-	// Start bot
-	log.Println("Starting bot...")
-	bot.Start(ctx)
+	// Start hub
+	log.Println("Starting hub...")
+	hub.Start(ctx)
 
-	// Wait for workers to finish
+	// Wait for all workers to finish
 	wg.Wait()
 	log.Println("All workers stopped.")
 }

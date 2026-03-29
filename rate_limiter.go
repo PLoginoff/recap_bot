@@ -10,9 +10,9 @@ type RateLimiter interface {
 }
 
 type DefaultRateLimiter struct {
-	requests    sync.Map // map[userID][]time.Time
-	rateLimit   int
-	rateTime    time.Duration
+	requests  sync.Map // map[userID][]time.Time
+	rateLimit int
+	rateTime  time.Duration
 }
 
 func NewDefaultRateLimiter(rateLimit int, rateTime time.Duration) *DefaultRateLimiter {
@@ -24,7 +24,7 @@ func NewDefaultRateLimiter(rateLimit int, rateTime time.Duration) *DefaultRateLi
 
 func (r *DefaultRateLimiter) IsAllowed(userID string) bool {
 	now := time.Now()
-	
+
 	// Get existing requests
 	value, ok := r.requests.Load(userID)
 	var requests []time.Time

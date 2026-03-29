@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"time"
 
 	telegrambot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -21,32 +24,29 @@ const telegramFileURL = "https://api.telegram.org/file/bot%s/%s"
 const telegramGetFileURL = "https://api.telegram.org/bot%s/getFile"
 const telegramEditMessageURL = "https://api.telegram.org/bot%s/editMessageText"
 
+const telegramHTTPTimeout = 30 * time.Second
+const telegramDownloadTimeout = 120 * time.Second
+
 type TelegramMessenger struct {
-	token       string
-	bot         *telegrambot.Bot
-	taskQueue   chan<- *RecapTask
-	rateLimiter RateLimiter
-	saveDebug   bool
-	messages    ConfigMessages
+	botID          string
+	token          string
+	bot            *telegrambot.Bot
+	taskQueue      chan<- *Task
+	rateLimiter    RateLimiter
+	messages       ConfigMessages
+	httpClient     *http.Client
+	downloadClient *http.Client
 }
 
-type TelegramMessage struct {
-	ChatID      string
-	MessageID   string
-	FileID      string
-	Text        string
-	UserID      string
-	IsVoice     bool
-	IsVideoNote bool
-}
-
-func NewTelegramMessenger(token string, taskQueue chan<- *RecapTask, rateLimiter RateLimiter, saveDebug bool, messages ConfigMessages) *TelegramMessenger {
+func NewTelegramMessenger(botID string, config ConfigBot, taskQueue chan<- *Task, rateLimiter RateLimiter, messages ConfigMessages) *TelegramMessenger {
 	return &TelegramMessenger{
-		token:       token,
-		taskQueue:   taskQueue,
-		rateLimiter: rateLimiter,
-		saveDebug:   saveDebug,
-		messages:    messages,
+		botID:          botID,
+		token:          config.Token,
+		taskQueue:      taskQueue,
+		rateLimiter:    rateLimiter,
+		messages:       messages,
+		httpClient:     &http.Client{Timeout: telegramHTTPTimeout},
+		downloadClient: &http.Client{Timeout: telegramDownloadTimeout},
 	}
 }
 
@@ -58,7 +58,7 @@ func (tc *TelegramMessenger) Start(ctx context.Context) error {
 
 	tc.bot = telegrambot.New(tc.token, opts...)
 	tc.bot.Start(ctx)
-	
+
 	return nil
 }
 
@@ -83,8 +83,8 @@ func (tc *TelegramMessenger) SendMessage(ctx context.Context, chatID, replyTo, t
 	}
 
 	var apiResponse struct {
-		OK          bool `json:"ok"`
-		Result      struct {
+		OK     bool `json:"ok"`
+		Result struct {
 			MessageID int `json:"message_id"`
 		} `json:"result"`
 	}
@@ -98,13 +98,21 @@ func (tc *TelegramMessenger) SendMessage(ctx context.Context, chatID, replyTo, t
 	return strconv.Itoa(apiResponse.Result.MessageID), nil
 }
 
-func (tc *TelegramMessenger) UpdateMessage(ctx context.Context, chatID, messageID, text string) error {
+func (tc *TelegramMessenger) UpdateMessage(ctx context.Context, chatID, messageID, text string, formatted bool) error {
+	if formatted {
+		text = tc.formatText(text)
+	}
+
 	apiURL := fmt.Sprintf(telegramEditMessageURL, tc.token)
 	data := url.Values{}
 	data.Set("chat_id", chatID)
 	data.Set("message_id", messageID)
 	data.Set("text", text)
-	data.Set("parse_mode", "HTML")
+
+	// Add HTML parsing only for final result
+	if formatted {
+		data.Set("parse_mode", "HTML")
+	}
 
 	resp, err := http.PostForm(apiURL, data)
 	if err != nil {
@@ -130,18 +138,32 @@ func (tc *TelegramMessenger) UpdateMessage(ctx context.Context, chatID, messageI
 	return nil
 }
 
+// formatText formats text for Telegram messenger (expandable blockquote for long text)
+func (tc *TelegramMessenger) formatText(text string) string {
+	// Use expandable blockquote for multi-paragraph text
+	paragraphs := strings.Split(text, "\n\n")
+	if len(paragraphs) <= 1 {
+		return html.EscapeString(text)
+	}
+
+	return fmt.Sprintf("<blockquote expandable>%s</blockquote>", html.EscapeString(text))
+}
+
 func (tc *TelegramMessenger) DownloadFile(ctx context.Context, filePath string) (string, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf(telegramFileURL, tc.token, filePath), nil)
 	if err != nil {
 		return "", nil, err
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := tc.downloadClient.Do(req)
 	if err != nil {
 		return "", nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("telegram download error: %s", resp.Status)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -220,30 +242,29 @@ func (tc *TelegramMessenger) handleVoiceMessage(ctx context.Context, bot *telegr
 
 	if !tc.rateLimiter.IsAllowed(userID) {
 		log.Printf("Rate limit exceeded for user %s", userID)
+		tc.SendMessage(ctx, strconv.Itoa(update.Message.Chat.ID), "", tc.messages.RateLimitMessage)
 		return
 	}
 
-	task := &RecapTask{
-		Messenger:     MessengerTelegram,
-		ChatID:        strconv.Itoa(update.Message.Chat.ID),
-		MessageID:     strconv.Itoa(update.Message.ID),
-		FileID:        voice.FileID,
-		Status:        StatusDownload,
-		IsVideoNote:   false,
-	}
-	if tc.saveDebug {
-		task.DebugDir = "voice_audio"
-		task.DebugExt = "ogg"
-		task.RawDebugDir = "voice_audio"
-		task.RawDebugExt = "ogg"
+	task := &Task{
+		BotID:           tc.botID,
+		Messenger:       MessengerTelegram,
+		ChatID:          strconv.Itoa(update.Message.Chat.ID),
+		MessageID:       strconv.Itoa(update.Message.ID),
+		FileID:          voice.FileID,
+		Status:          StatusDownload,
+		IsVideoNote:     false,
+		IsMP3:           false, // Telegram sends OGG
+		StatusMessageID: "",    // Will be set after sending status message
+		StatusText:      tc.messages.Listening,
 	}
 
 	statusText := tc.messages.Listening
 	if messageID, err := tc.SendMessage(ctx, task.ChatID, task.MessageID, statusText); err != nil {
 		log.Printf("Failed to send thinking message: %v", err)
 	} else {
+		log.Printf("Telegram: sent status message with ID: %s", messageID)
 		task.StatusMessageID = messageID
-		task.StatusText = statusText
 	}
 
 	tc.taskQueue <- task
@@ -259,22 +280,21 @@ func (tc *TelegramMessenger) handleVideoNote(ctx context.Context, bot *telegramb
 
 	if !tc.rateLimiter.IsAllowed(userID) {
 		log.Printf("Rate limit exceeded for user %s", userID)
+		tc.SendMessage(ctx, strconv.Itoa(update.Message.Chat.ID), "", tc.messages.RateLimitMessage)
 		return
 	}
 
-	task := &RecapTask{
-		Messenger:     MessengerTelegram,
-		ChatID:        strconv.Itoa(update.Message.Chat.ID),
-		MessageID:     strconv.Itoa(update.Message.ID),
-		FileID:        video.FileID,
-		Status:        StatusDownload,
-		IsVideoNote:   true,
-	}
-	if tc.saveDebug {
-		task.DebugDir = "video_note_audio"
-		task.DebugExt = "ogg"
-		task.RawDebugDir = "video_note_raw"
-		task.RawDebugExt = "mp4"
+	task := &Task{
+		BotID:           tc.botID,
+		Messenger:       MessengerTelegram,
+		ChatID:          strconv.Itoa(update.Message.Chat.ID),
+		MessageID:       strconv.Itoa(update.Message.ID),
+		FileID:          video.FileID,
+		Status:          StatusDownload,
+		IsVideoNote:     true,
+		IsMP3:           false, // Video notes are MP4, will be converted
+		StatusMessageID: "",    // Will be set after sending status message
+		StatusText:      tc.messages.Listening,
 	}
 
 	statusText := tc.messages.Listening
@@ -301,9 +321,9 @@ func (tc *TelegramMessenger) handleInlineQuery(ctx context.Context, bot *telegra
 		return
 	}
 
-	task := &RecapTask{
+	task := &Task{
 		Messenger:   MessengerTelegram,
-		ChatID:      "", // Inline queries don't have a chat
+		ChatID:      strconv.Itoa(update.InlineQuery.From.ID),
 		MessageID:   "",
 		FileID:      "",
 		Status:      StatusRecap,
