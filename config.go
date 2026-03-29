@@ -20,7 +20,7 @@ type Config struct {
 	WaitOnError    time.Duration        `yaml:"wait_on_error" default:"3s"`
 	FFmpegPath     string               `yaml:"ffmpeg_path" default:"ffmpeg"`
 	SaveDebugMedia bool                 `yaml:"save_debug_media" default:"false"`
-	StateFile      string               `yaml:"state_file"`
+	StateFile      string               `yaml:"state_file" default:"state.txt"`
 	Bots           map[string]ConfigBot `yaml:"bots"`
 }
 

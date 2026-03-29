@@ -101,6 +101,10 @@ type MaxMessage struct {
 	Sender    MaxSender      `json:"sender"`
 	Timestamp int64          `json:"timestamp"`
 	Body      MaxMessageBody `json:"body"`
+	// Attachments at message level (for forwarded messages)
+	Attachments []MaxAttachment `json:"attachments,omitempty"`
+	// Link for forwarded/replied messages
+	Link *MaxLink `json:"link,omitempty"`
 }
 
 type MaxRecipient struct {
@@ -114,6 +118,11 @@ type MaxSender struct {
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
 	Name      string `json:"name"`
+}
+
+type MaxLink struct {
+	Type    string     `json:"type"`
+	Message MaxMessage `json:"message"`
 }
 
 type MaxMessageBody struct {
@@ -181,6 +190,9 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 		return nil, 0, fmt.Errorf("max API error (%s): %s", resp.Status, string(body))
 	}
 
+	// Log raw response from Max API for debugging
+	log.Printf("Max: Raw API response:\n%s", string(body))
+
 	var response struct {
 		Updates []MaxUpdate `json:"updates"`
 		Marker  int64       `json:"marker"`
@@ -193,11 +205,66 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 }
 
 func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
+	// Log full update structure for debugging forwarded messages
+	updateJSON, _ := json.MarshalIndent(update, "", "  ")
+	log.Printf("Max: Full update structure:\n%s", string(updateJSON))
+
 	if update.Message == nil {
+		log.Printf("Max: update.Message is nil")
 		return
 	}
 
 	msg := update.Message
+
+	// Check if this is a forwarded message via link field
+	if msg.Link != nil {
+		log.Printf("Max: Link found in message, type=%s", msg.Link.Type)
+		if msg.Link.Type == "forward" {
+			log.Printf("Max: Forwarded message detected via link")
+			linkJSON, _ := json.MarshalIndent(msg.Link, "", "  ")
+			log.Printf("Max: Link structure:\n%s", string(linkJSON))
+
+			// Check attachments in the linked message at message level
+			if len(msg.Link.Message.Attachments) > 0 {
+				log.Printf("Max: Found %d attachments at message level in forwarded message", len(msg.Link.Message.Attachments))
+				for i, attachment := range msg.Link.Message.Attachments {
+					log.Printf("Max: Forwarded attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+					if attachment.Type == "audio" || attachment.Type == "voice" {
+						log.Printf("Max: Found audio/voice attachment in forwarded message, processing...")
+						m.handleAudioAttachment(ctx, msg, attachment)
+						return
+					}
+					if attachment.Type == "video" {
+						log.Printf("Max: Found video attachment in forwarded message, processing...")
+						m.handleVideoAttachment(ctx, msg, attachment)
+						return
+					}
+				}
+			}
+
+			// Also check attachments in the linked message body
+			if len(msg.Link.Message.Body.Attachments) > 0 {
+				log.Printf("Max: Found %d attachments in body of forwarded message", len(msg.Link.Message.Body.Attachments))
+				for i, attachment := range msg.Link.Message.Body.Attachments {
+					log.Printf("Max: Forwarded body attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+					if attachment.Type == "audio" || attachment.Type == "voice" {
+						log.Printf("Max: Found audio/voice attachment in forwarded message body, processing...")
+						m.handleAudioAttachment(ctx, msg, attachment)
+						return
+					}
+					if attachment.Type == "video" {
+						log.Printf("Max: Found video attachment in forwarded message body, processing...")
+						m.handleVideoAttachment(ctx, msg, attachment)
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Log message body structure
+	bodyJSON, _ := json.MarshalIndent(msg.Body, "", "  ")
+	log.Printf("Max: Message body structure:\n%s", string(bodyJSON))
 
 	// Handle text commands
 	if msg.Body.Text == "/start" {
@@ -205,17 +272,41 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 		return
 	}
 
-	// Handle attachments (voice/audio/video)
-	for _, attachment := range msg.Body.Attachments {
+	// Handle attachments (voice/audio/video) in main message
+	log.Printf("Max: Checking %d attachments in main message", len(msg.Body.Attachments))
+	for i, attachment := range msg.Body.Attachments {
+		log.Printf("Max: Attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
 		if attachment.Type == "audio" || attachment.Type == "voice" {
+			log.Printf("Max: Found audio/voice attachment in main message, processing...")
 			m.handleAudioAttachment(ctx, msg, attachment)
 			return
 		}
 		if attachment.Type == "video" {
+			log.Printf("Max: Found video attachment in main message, processing...")
 			m.handleVideoAttachment(ctx, msg, attachment)
 			return
 		}
 	}
+
+	// Also check attachments at message level (for some message types)
+	if len(msg.Attachments) > 0 {
+		log.Printf("Max: Found %d attachments at message level", len(msg.Attachments))
+		for i, attachment := range msg.Attachments {
+			log.Printf("Max: Message level attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+			if attachment.Type == "audio" || attachment.Type == "voice" {
+				log.Printf("Max: Found audio/voice attachment at message level, processing...")
+				m.handleAudioAttachment(ctx, msg, attachment)
+				return
+			}
+			if attachment.Type == "video" {
+				log.Printf("Max: Found video attachment at message level, processing...")
+				m.handleVideoAttachment(ctx, msg, attachment)
+				return
+			}
+		}
+	}
+
+	log.Printf("Max: No audio/voice/video attachments found in message, link, or body")
 }
 
 func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {

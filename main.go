@@ -59,12 +59,7 @@ func main() {
 	// Create hub
 	log.Printf("Configured %d bots", len(config.Bots))
 
-	statePath := config.StateFile
-	if statePath == "" {
-		statePath = "state.txt"
-	}
-
-	stateStore, err := NewStateStore(statePath)
+	stateStore, err := NewStateStore(config.StateFile)
 	if err != nil {
 		log.Fatalf("Failed to create state store: %v", err)
 	}

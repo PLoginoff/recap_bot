@@ -92,38 +92,6 @@ func (h *Hub) getPromptForBot(botID string) string {
 	return config.Prompt
 }
 
-func (h *Hub) SendMessageWithBot(ctx context.Context, botID string, chatID, replyTo, text string) (string, error) {
-	bot, err := h.getBot(botID)
-	if err != nil {
-		return "", err
-	}
-	return bot.SendMessage(ctx, chatID, replyTo, text)
-}
-
-func (h *Hub) UpdateMessageWithBot(ctx context.Context, botID string, chatID, messageID, text string, formatted bool) error {
-	bot, err := h.getBot(botID)
-	if err != nil {
-		return err
-	}
-	return bot.UpdateMessage(ctx, chatID, messageID, text, formatted)
-}
-
-func (h *Hub) GetFileWithBot(ctx context.Context, botID string, fileID string) (*FileInfo, error) {
-	bot, err := h.getBot(botID)
-	if err != nil {
-		return nil, err
-	}
-	return bot.GetFile(ctx, fileID)
-}
-
-func (h *Hub) DownloadFileWithBot(ctx context.Context, botID string, filePath string) (string, []byte, error) {
-	bot, err := h.getBot(botID)
-	if err != nil {
-		return "", nil, err
-	}
-	return bot.DownloadFile(ctx, filePath)
-}
-
 func (h *Hub) UpdateMessageForTask(ctx context.Context, task *Task, text string, formatted bool) error {
 	bot, err := h.getBot(task.BotID)
 	if err != nil {
@@ -165,32 +133,6 @@ func (h *Hub) addDotToStatus(ctx context.Context, task *Task) {
 		} else {
 			task.StatusText = newStatus
 		}
-	}
-}
-
-func (h *Hub) ProcessTask(ctx context.Context, task *Task) error {
-	// Process task through different stages
-	switch task.Status {
-	case StatusDownload:
-		_, _, err := h.DownloadFileForTask(ctx, task)
-		return err
-	case StatusSTT:
-		_, err := h.Recognize(ctx, task.AudioData)
-		if err != nil {
-			return err
-		}
-		task.Text, err = h.Recognize(ctx, task.AudioData)
-		return err
-	case StatusRecap:
-		var err error
-		task.Summary, err = h.Summarize(ctx, task.Text, task.BotID)
-		return err
-	case StatusSent:
-		return h.UpdateMessageForTask(ctx, task, task.Summary, true)
-	case StatusDone:
-		return nil
-	default:
-		return fmt.Errorf("unknown task status: %s", task.Status)
 	}
 }
 

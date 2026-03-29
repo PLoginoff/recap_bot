@@ -43,14 +43,14 @@ Telegram бот для создания краткого содержания и
 4. Вы можете собрать сами или скачать бирань на свой сервер
 
 ```
-wget https://github.com/ploginoff/recap_bot/releases/download/v2.0/recap_x64.tar.gz
+wget https://github.com/ploginoff/recap_bot/releases/download/v2.2/recap_x64.tar.gz
 tar xfz recap_x64.tar.gz
 ./recap
 ```
 
 ### Формат `state.txt`
 
-Каждая строка в `state_file` описывает ресурс вида `service;id;paused_until;used_seconds;cooldown_seconds;window_seconds`.
+Состояние токенов в yaml формате.
 
 ## Ротация моделей и токенов
 
