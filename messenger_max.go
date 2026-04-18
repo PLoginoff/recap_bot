@@ -29,22 +29,20 @@ const maxHTTPTimeout = 30 * time.Second
 const maxUpdatesTimeout = 29 // seconds for long polling, less than prev
 
 type MaxMessenger struct {
-	botID          string
 	token          string
-	taskQueue      chan<- *Task
-	rateLimiter    RateLimiter
+	eventHandler   EventHandler
 	messages       ConfigMessages
 	httpClient     *http.Client
 	downloadClient *http.Client
+	debug          bool
 }
 
-func NewMaxMessenger(botID string, config ConfigBot, taskQueue chan<- *Task, rateLimiter RateLimiter, messages ConfigMessages) *MaxMessenger {
+func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHandler, debug bool) *MaxMessenger {
 	return &MaxMessenger{
-		botID:       botID,
-		token:       config.Token,
-		taskQueue:   taskQueue,
-		rateLimiter: rateLimiter,
-		messages:    messages,
+		token:        token,
+		messages:     messages,
+		eventHandler: eventHandler,
+		debug:        debug,
 		httpClient: &http.Client{
 			Timeout: maxHTTPTimeout,
 		},
@@ -190,8 +188,14 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 		return nil, 0, fmt.Errorf("max API error (%s): %s", resp.Status, string(body))
 	}
 
-	// Log raw response from Max API for debugging
-	log.Printf("Max: Raw API response:\n%s", string(body))
+	// Log raw response from Max API for debugging (trimmed)
+	if m.debug {
+		debugSnippet := string(body)
+		if len(debugSnippet) > 512 {
+			debugSnippet = debugSnippet[:512] + "..."
+		}
+		log.Printf("Max: Raw API response (trimmed): %s", debugSnippet)
+	}
 
 	var response struct {
 		Updates []MaxUpdate `json:"updates"`
@@ -205,9 +209,11 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 }
 
 func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
-	// Log full update structure for debugging forwarded messages
-	updateJSON, _ := json.MarshalIndent(update, "", "  ")
-	log.Printf("Max: Full update structure:\n%s", string(updateJSON))
+	// Log compact update info for debugging
+	if m.debug {
+		updateJSON, _ := json.Marshal(update)
+		log.Printf("Max: Update (compact): %s", string(updateJSON))
+	}
 
 	if update.Message == nil {
 		log.Printf("Max: update.Message is nil")
@@ -218,24 +224,38 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 
 	// Check if this is a forwarded message via link field
 	if msg.Link != nil {
-		log.Printf("Max: Link found in message, type=%s", msg.Link.Type)
+		if m.debug {
+			log.Printf("Max: Link found in message, type=%s", msg.Link.Type)
+		}
 		if msg.Link.Type == "forward" {
-			log.Printf("Max: Forwarded message detected via link")
+			if m.debug {
+				log.Printf("Max: Forwarded message detected via link")
+			}
 			linkJSON, _ := json.MarshalIndent(msg.Link, "", "  ")
-			log.Printf("Max: Link structure:\n%s", string(linkJSON))
+			if m.debug {
+				log.Printf("Max: Link structure:\n%s", string(linkJSON))
+			}
 
 			// Check attachments in the linked message at message level
 			if len(msg.Link.Message.Attachments) > 0 {
-				log.Printf("Max: Found %d attachments at message level in forwarded message", len(msg.Link.Message.Attachments))
+				if m.debug {
+					log.Printf("Max: Found %d attachments at message level in forwarded message", len(msg.Link.Message.Attachments))
+				}
 				for i, attachment := range msg.Link.Message.Attachments {
-					log.Printf("Max: Forwarded attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+					if m.debug {
+						log.Printf("Max: Forwarded attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+					}
 					if attachment.Type == "audio" || attachment.Type == "voice" {
-						log.Printf("Max: Found audio/voice attachment in forwarded message, processing...")
+						if m.debug {
+							log.Printf("Max: Found audio/voice attachment in forwarded message, processing...")
+						}
 						m.handleAudioAttachment(ctx, msg, attachment)
 						return
 					}
 					if attachment.Type == "video" {
-						log.Printf("Max: Found video attachment in forwarded message, processing...")
+						if m.debug {
+							log.Printf("Max: Found video attachment in forwarded message, processing...")
+						}
 						m.handleVideoAttachment(ctx, msg, attachment)
 						return
 					}
@@ -244,16 +264,24 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 
 			// Also check attachments in the linked message body
 			if len(msg.Link.Message.Body.Attachments) > 0 {
-				log.Printf("Max: Found %d attachments in body of forwarded message", len(msg.Link.Message.Body.Attachments))
+				if m.debug {
+					log.Printf("Max: Found %d attachments in body of forwarded message", len(msg.Link.Message.Body.Attachments))
+				}
 				for i, attachment := range msg.Link.Message.Body.Attachments {
-					log.Printf("Max: Forwarded body attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+					if m.debug {
+						log.Printf("Max: Forwarded body attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+					}
 					if attachment.Type == "audio" || attachment.Type == "voice" {
-						log.Printf("Max: Found audio/voice attachment in forwarded message body, processing...")
+						if m.debug {
+							log.Printf("Max: Found audio/voice attachment in forwarded message body, processing...")
+						}
 						m.handleAudioAttachment(ctx, msg, attachment)
 						return
 					}
 					if attachment.Type == "video" {
-						log.Printf("Max: Found video attachment in forwarded message body, processing...")
+						if m.debug {
+							log.Printf("Max: Found video attachment in forwarded message body, processing...")
+						}
 						m.handleVideoAttachment(ctx, msg, attachment)
 						return
 					}
@@ -262,9 +290,10 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 		}
 	}
 
-	// Log message body structure
-	bodyJSON, _ := json.MarshalIndent(msg.Body, "", "  ")
-	log.Printf("Max: Message body structure:\n%s", string(bodyJSON))
+	if m.debug {
+		bodyJSON, _ := json.MarshalIndent(msg.Body, "", "  ")
+		log.Printf("Max: Message body structure:\n%s", string(bodyJSON))
+	}
 
 	// Handle text commands
 	if msg.Body.Text == "/start" {
@@ -273,16 +302,24 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 	}
 
 	// Handle attachments (voice/audio/video) in main message
-	log.Printf("Max: Checking %d attachments in main message", len(msg.Body.Attachments))
+	if m.debug {
+		log.Printf("Max: Checking %d attachments in main message", len(msg.Body.Attachments))
+	}
 	for i, attachment := range msg.Body.Attachments {
-		log.Printf("Max: Attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+		if m.debug {
+			log.Printf("Max: Attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+		}
 		if attachment.Type == "audio" || attachment.Type == "voice" {
-			log.Printf("Max: Found audio/voice attachment in main message, processing...")
+			if m.debug {
+				log.Printf("Max: Found audio/voice attachment in main message, processing...")
+			}
 			m.handleAudioAttachment(ctx, msg, attachment)
 			return
 		}
 		if attachment.Type == "video" {
-			log.Printf("Max: Found video attachment in main message, processing...")
+			if m.debug {
+				log.Printf("Max: Found video attachment in main message, processing...")
+			}
 			m.handleVideoAttachment(ctx, msg, attachment)
 			return
 		}
@@ -290,23 +327,33 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 
 	// Also check attachments at message level (for some message types)
 	if len(msg.Attachments) > 0 {
-		log.Printf("Max: Found %d attachments at message level", len(msg.Attachments))
+		if m.debug {
+			log.Printf("Max: Found %d attachments at message level", len(msg.Attachments))
+		}
 		for i, attachment := range msg.Attachments {
-			log.Printf("Max: Message level attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+			if m.debug {
+				log.Printf("Max: Message level attachment %d: type=%s, payload=%+v", i, attachment.Type, attachment.Payload)
+			}
 			if attachment.Type == "audio" || attachment.Type == "voice" {
-				log.Printf("Max: Found audio/voice attachment at message level, processing...")
+				if m.debug {
+					log.Printf("Max: Found audio/voice attachment at message level, processing...")
+				}
 				m.handleAudioAttachment(ctx, msg, attachment)
 				return
 			}
 			if attachment.Type == "video" {
-				log.Printf("Max: Found video attachment at message level, processing...")
+				if m.debug {
+					log.Printf("Max: Found video attachment at message level, processing...")
+				}
 				m.handleVideoAttachment(ctx, msg, attachment)
 				return
 			}
 		}
 	}
 
-	log.Printf("Max: No audio/voice/video attachments found in message, link, or body")
+	if m.debug {
+		log.Printf("Max: No audio/voice/video attachments found in message, link, or body")
+	}
 }
 
 func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {
@@ -316,65 +363,33 @@ func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {
 }
 
 func (m *MaxMessenger) handleAudioAttachment(ctx context.Context, msg *MaxMessage, attachment MaxAttachment) {
-	if !m.rateLimiter.IsAllowed(strconv.FormatInt(msg.Sender.UserID, 10)) {
-		m.SendMessage(ctx, strconv.FormatInt(msg.Recipient.ChatID, 10), "", m.messages.RateLimitMessage)
-		return
+	// Send event instead of creating Task
+	event := &IncomingEvent{
+		Type:      EventIncomingVoice,
+		ChatID:    strconv.FormatInt(msg.Recipient.ChatID, 10),
+		MessageID: msg.Body.Mid,
+		FileID:    attachment.Payload.URL,
+		UserID:    strconv.FormatInt(msg.Sender.UserID, 10),
+		Timestamp: time.Now(),
+		Messenger: MessengerMax,
+		IsMP3:     true, // Max sends MP3
 	}
-
-	// Send initial status message with reply to original message
-	statusMsgID, err := m.SendMessage(ctx, strconv.FormatInt(msg.Recipient.ChatID, 10), msg.Body.Mid, m.messages.Listening)
-	if err != nil {
-		log.Printf("Max: failed to send status message: %v", err)
-		return
-	}
-
-	log.Printf("Max: sent status message with ID: %s", statusMsgID)
-
-	task := &Task{
-		BotID:           m.botID,
-		Messenger:       MessengerMax,
-		ChatID:          strconv.FormatInt(msg.Recipient.ChatID, 10),
-		MessageID:       msg.Body.Mid,
-		FileID:          attachment.Payload.URL, // Use URL directly from attachment
-		Status:          StatusDownload,
-		IsVideoNote:     false,
-		IsMP3:           true,        // Max sends MP3 audio
-		StatusMessageID: statusMsgID, // Use actual message ID from SendMessage
-		StatusText:      m.messages.Listening,
-	}
-
-	m.taskQueue <- task
+	m.eventHandler(ctx, event)
 }
 
 func (m *MaxMessenger) handleVideoAttachment(ctx context.Context, msg *MaxMessage, attachment MaxAttachment) {
-	if !m.rateLimiter.IsAllowed(strconv.FormatInt(msg.Sender.UserID, 10)) {
-		m.SendMessage(ctx, strconv.FormatInt(msg.Recipient.ChatID, 10), "", m.messages.RateLimitMessage)
-		return
+	// Send event instead of creating Task
+	event := &IncomingEvent{
+		Type:      EventIncomingVideo,
+		ChatID:    strconv.FormatInt(msg.Recipient.ChatID, 10),
+		MessageID: msg.Body.Mid,
+		FileID:    attachment.Payload.URL,
+		UserID:    strconv.FormatInt(msg.Sender.UserID, 10),
+		Timestamp: time.Now(),
+		Messenger: MessengerMax,
+		IsMP3:     false, // Video notes are MP4
 	}
-
-	// Send initial status message with reply to original message
-	statusMsgID, err := m.SendMessage(ctx, strconv.FormatInt(msg.Recipient.ChatID, 10), msg.Body.Mid, m.messages.Listening)
-	if err != nil {
-		log.Printf("Max: failed to send status message: %v", err)
-		return
-	}
-
-	log.Printf("Max: sent status message with ID: %s", statusMsgID)
-
-	task := &Task{
-		BotID:           m.botID,
-		Messenger:       MessengerMax,
-		ChatID:          strconv.FormatInt(msg.Recipient.ChatID, 10),
-		MessageID:       msg.Body.Mid,
-		FileID:          attachment.Payload.URL, // Use URL directly from attachment
-		Status:          StatusDownload,
-		IsVideoNote:     true,  // This is a video note
-		IsMP3:           false, // Video notes are MP4, will be converted
-		StatusMessageID: statusMsgID,
-		StatusText:      m.messages.Listening,
-	}
-
-	m.taskQueue <- task
+	m.eventHandler(ctx, event)
 }
 
 func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text string) (string, error) {
@@ -403,8 +418,10 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 		return "", err
 	}
 
-	log.Printf("Max: SendMessage request URL: %s", url)
-	log.Printf("Max: SendMessage request body: %s", string(jsonBody))
+	if m.debug {
+		log.Printf("Max: SendMessage request URL: %s", url)
+		log.Printf("Max: SendMessage request body: %s", string(jsonBody))
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -424,7 +441,9 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 		return "", err
 	}
 
-	log.Printf("Max: SendMessage response (%s): %s", resp.Status, string(body))
+	if m.debug {
+		log.Printf("Max: SendMessage response (%s): %s", resp.Status, string(body))
+	}
 
 	// If chat_id fails, try user_id format
 	if resp.StatusCode == 400 && strings.Contains(string(body), "Unknown recipient") {
@@ -432,7 +451,9 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 
 		url = fmt.Sprintf("%s/messages?user_id=%d", maxAPIURL, chatIDInt)
 
-		log.Printf("Max: SendMessage retry URL: %s", url)
+		if m.debug {
+			log.Printf("Max: SendMessage retry URL: %s", url)
+		}
 
 		req, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 		if err != nil {
@@ -452,7 +473,9 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 			return "", err
 		}
 
-		log.Printf("Max: SendMessage retry response (%s): %s", resp.Status, string(body))
+		if m.debug {
+			log.Printf("Max: SendMessage retry response (%s): %s", resp.Status, string(body))
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -500,8 +523,10 @@ func (m *MaxMessenger) UpdateMessage(ctx context.Context, chatID, messageID, tex
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	log.Printf("Max: UpdateMessage URL: %s", url)
-	log.Printf("Max: UpdateMessage body: %s", string(jsonBody))
+	if m.debug {
+		log.Printf("Max: UpdateMessage URL: %s", url)
+		log.Printf("Max: UpdateMessage body: %s", string(jsonBody))
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -521,7 +546,9 @@ func (m *MaxMessenger) UpdateMessage(ctx context.Context, chatID, messageID, tex
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	log.Printf("Max: UpdateMessage response (%s): %s", resp.Status, string(body))
+	if m.debug {
+		log.Printf("Max: UpdateMessage response (%s): %s", resp.Status, string(body))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("max API error (%s): %s", resp.Status, string(body))

@@ -30,39 +30,17 @@ func main() {
 		config.WaitOnError = 3 * time.Second
 	}
 
-	// Create task channel
-	taskQueue := make(chan *Task, 100)
-
 	// Create shared rate limiter from config
 	rateLimiter := NewDefaultRateLimiter(config.RateLimit.MaxRequests, config.RateLimit.TimeWindow)
 
-	// Create messenger clients from config
-	bots := make(map[string]MessengerClient)
+	// Create context for graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
-	for botID, botConfig := range config.Bots {
-		switch botConfig.Messenger {
-		case MessengerTelegram:
-			telegramMessenger := NewTelegramMessenger(botID, botConfig, taskQueue, rateLimiter, config.Messages)
-			bots[botID] = telegramMessenger
-			log.Printf("Configured Telegram bot: %s", botConfig.ID)
-
-		case MessengerMax:
-			maxMessenger := NewMaxMessenger(botID, botConfig, taskQueue, rateLimiter, config.Messages)
-			bots[botID] = maxMessenger
-			log.Printf("Configured Max bot: %s", botConfig.ID)
-
-		default:
-			log.Printf("Unknown messenger type: %s", botConfig.Messenger)
-		}
-	}
-
-	// Create hub
+	// Create hub first (as EventSink)
 	log.Printf("Configured %d bots", len(config.Bots))
 
-	stateStore, err := NewStateStore(config.StateFile)
-	if err != nil {
-		log.Fatalf("Failed to create state store: %v", err)
-	}
+	stateStore := NewStateStore(config.StateFile)
 
 	var recognizer SpeechRecognizer
 	recognizerType := config.Recognizer
@@ -109,23 +87,31 @@ func main() {
 		UserPrompt:   config.Prompts.UserPrompt,
 	}
 
-	openrouterClient := NewOpenRouterClient(openrouterConfig, stateStore)
+	openrouterClient := NewOpenRouterClient(openrouterConfig, stateStore, config.Debug)
 
-	// Create hub
-	hub, err := NewHub(bots, config.Bots, recognizer, openrouterClient, taskQueue, config.FFmpegPath, config.SaveDebugMedia, config.Messages)
+	// Create hub (EventSink)
+	hub, err := NewHub(nil, recognizer, openrouterClient, config.FFmpegPath, config.SaveDebugMedia)
 	if err != nil {
 		log.Fatalf("Failed to create hub: %v", err)
 	}
 
-	// Create context for graceful shutdown
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	// Create bots from config
+	bots := make(map[string]*Bot)
+
+	for botID, botConfig := range config.Bots {
+		bot := NewBot(botID, botConfig, config.Messages, hub, rateLimiter, config.Debug)
+		bots[botID] = bot
+		log.Printf("Configured %s bot: %s", botConfig.Messenger, botConfig.ID)
+	}
+
+	// Update hub with bots
+	hub.bots = bots
 
 	// Start workers
 	var wg sync.WaitGroup
 	for i := 0; i < config.NumWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, &wg, i, taskQueue, hub, config.WaitOnError, config.Messages.RetryMessage, loggers)
+		go worker(ctx, &wg, i, hub.GetTaskQueue(), hub, config.WaitOnError, config.Messages.RetryMessage, loggers)
 	}
 
 	// Start hub

@@ -11,36 +11,34 @@ import (
 	"time"
 )
 
-func convertMP3ToOGG(ctx context.Context, ffmpegPath string, audioData []byte) ([]byte, error) {
-	inputFile, err := os.CreateTemp("", "max-mp3-*.mp3")
+// convertToOGG converts audio/video data to OGG Opus format using ffmpeg.
+func convertToOGG(ctx context.Context, ffmpegPath string, audioData []byte) ([]byte, error) {
+	inputFile, err := os.CreateTemp("", "recap-input-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp input file: %w", err)
 	}
-	defer os.Remove(inputFile.Name())
-	defer inputFile.Close()
+	inputPath := inputFile.Name()
+	defer os.Remove(inputPath)
 
 	if _, err := inputFile.Write(audioData); err != nil {
+		inputFile.Close()
 		return nil, fmt.Errorf("failed to write to temp input file: %w", err)
 	}
-	if err := inputFile.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close temp input file: %w", err)
-	}
+	inputFile.Close()
 
-	outputFile, err := os.CreateTemp("", "max-ogg-*.ogg")
+	outputFile, err := os.CreateTemp("", "recap-output-*.ogg")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp output file: %w", err)
 	}
-	defer os.Remove(outputFile.Name())
 	outputPath := outputFile.Name()
-	if err := outputFile.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close temp output file: %w", err)
-	}
+	outputFile.Close()
+	defer os.Remove(outputPath)
 
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-y",
 		"-fflags", "+genpts",
 		"-avoid_negative_ts", "make_zero",
-		"-i", inputFile.Name(),
+		"-i", inputPath,
 		"-map", "0:a:0",
 		"-vn",
 		"-ac", "1",
@@ -54,81 +52,7 @@ func convertMP3ToOGG(ctx context.Context, ffmpegPath string, audioData []byte) (
 		"-af", "aresample=async=1:first_pts=0",
 		"-map_metadata", "-1",
 		"-f", "ogg",
-		outputFile.Name(),
-	)
-
-	output, err := cmd.CombinedOutput()
-	outputText := strings.TrimSpace(string(output))
-	if err != nil {
-		return nil, fmt.Errorf("ffmpeg MP3 to OGG conversion failed: %w: %s", err, outputText)
-	}
-	if outputText != "" {
-		log.Printf("ffmpeg MP3 to OGG output: %s", outputText)
-	}
-
-	info, err := os.Stat(outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat converted OGG: %w", err)
-	}
-	if info.Size() == 0 {
-		if outputText == "" {
-			outputText = "no ffmpeg output"
-		}
-		return nil, fmt.Errorf("ffmpeg produced empty OGG output: %s", outputText)
-	}
-
-	oggData, err := os.ReadFile(outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read converted OGG: %w", err)
-	}
-
-	return oggData, nil
-}
-
-func convertVideoNote(ctx context.Context, ffmpegPath string, audioData []byte) ([]byte, error) {
-	inputFile, err := os.CreateTemp("", "tg-video-*.mp4")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp input file: %w", err)
-	}
-	defer os.Remove(inputFile.Name())
-	defer inputFile.Close()
-
-	if _, err := inputFile.Write(audioData); err != nil {
-		return nil, fmt.Errorf("failed to write to temp input file: %w", err)
-	}
-	if err := inputFile.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close temp input file: %w", err)
-	}
-
-	outputFile, err := os.CreateTemp("", "tg-audio-*.ogg")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp output file: %w", err)
-	}
-	defer os.Remove(outputFile.Name())
-	outputPath := outputFile.Name()
-	if err := outputFile.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close temp output file: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, ffmpegPath,
-		"-y",
-		"-fflags", "+genpts",
-		"-avoid_negative_ts", "make_zero",
-		"-i", inputFile.Name(),
-		"-map", "0:a:0",
-		"-vn",
-		"-ac", "1",
-		"-ar", "16000",
-		"-c:a", "libopus",
-		"-b:a", "32k",
-		"-vbr", "off",
-		"-application", "audio",
-		"-frame_duration", "20",
-		"-sample_fmt", "s16",
-		"-af", "aresample=async=1:first_pts=0",
-		"-map_metadata", "-1",
-		"-f", "ogg",
-		outputFile.Name(),
+		outputPath,
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -148,15 +72,18 @@ func convertVideoNote(ctx context.Context, ffmpegPath string, audioData []byte) 
 		if outputText == "" {
 			outputText = "no ffmpeg output"
 		}
-		return nil, fmt.Errorf("ffmpeg produced empty audio output: %s", outputText)
+		return nil, fmt.Errorf("ffmpeg produced empty output: %s", outputText)
 	}
 
-	audioData, err = os.ReadFile(outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read converted audio: %w", err)
-	}
+	return os.ReadFile(outputPath)
+}
 
-	return audioData, nil
+func convertMP3ToOGG(ctx context.Context, ffmpegPath string, audioData []byte) ([]byte, error) {
+	return convertToOGG(ctx, ffmpegPath, audioData)
+}
+
+func convertVideoNote(ctx context.Context, ffmpegPath string, audioData []byte) ([]byte, error) {
+	return convertToOGG(ctx, ffmpegPath, audioData)
 }
 
 func saveDebugAudio(taskID string, audioData []byte, messengerType MessengerType) {

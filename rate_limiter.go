@@ -46,5 +46,34 @@ func (r *DefaultRateLimiter) IsAllowed(userID string) bool {
 
 	recentRequests = append(recentRequests, now)
 	r.requests.Store(userID, recentRequests)
+
+	// KISS cleanup: remove empty entries periodically
+	if len(recentRequests) == 1 {
+		r.cleanupOldUsers(now)
+	}
+
 	return true
+}
+
+// cleanupOldUsers removes users with no recent activity (called occasionally)
+func (r *DefaultRateLimiter) cleanupOldUsers(now time.Time) {
+	r.requests.Range(func(key, value interface{}) bool {
+		requests := value.([]time.Time)
+		if len(requests) == 0 {
+			r.requests.Delete(key)
+			return true
+		}
+		// Check if all requests are old
+		allOld := true
+		for _, t := range requests {
+			if now.Sub(t) < r.rateTime {
+				allOld = false
+				break
+			}
+		}
+		if allOld {
+			r.requests.Delete(key)
+		}
+		return true
+	})
 }

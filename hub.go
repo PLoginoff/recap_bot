@@ -33,39 +33,141 @@ type Task struct {
 	StatusText      string        `json:"status_text"`
 	Wait            time.Duration `json:"wait"`
 	ErrorCount      int           `json:"error_count"`
+	InlineQueryID   string        `json:"inline_query_id"`
 }
 
 type Hub struct {
-	bots           map[string]MessengerClient // BotID -> messenger
-	botConfigs     map[string]ConfigBot       // BotID -> config
+	bots           map[string]*Bot
 	recognizer     SpeechRecognizer
 	openrouter     *OpenRouterClient
-	taskQueue      <-chan *Task
+	taskQueue      chan *Task
 	ffmpegPath     string
 	saveDebugMedia bool
-	messages       ConfigMessages
 }
 
-func NewHub(bots map[string]MessengerClient, botConfigs map[string]ConfigBot, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, taskQueue <-chan *Task, ffmpegPath string, saveDebugMedia bool, messages ConfigMessages) (*Hub, error) {
+func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, ffmpegPath string, saveDebugMedia bool) (*Hub, error) {
+	taskQueue := make(chan *Task, 100)
 	return &Hub{
 		bots:           bots,
-		botConfigs:     botConfigs,
 		recognizer:     recognizer,
 		openrouter:     openrouterClient,
 		taskQueue:      taskQueue,
 		ffmpegPath:     ffmpegPath,
 		saveDebugMedia: saveDebugMedia,
-		messages:       messages,
 	}, nil
+}
+
+// createVoiceTask creates a task for voice messages
+func (h *Hub) createVoiceTask(event *IncomingEvent, bot *Bot) *Task {
+	task := &Task{
+		BotID:       event.BotID,
+		Messenger:   event.Messenger,
+		ChatID:      event.ChatID,
+		MessageID:   event.MessageID,
+		FileID:      event.FileID,
+		Status:      StatusDownload,
+		IsVideoNote: false,
+		IsMP3:       event.IsMP3,
+		StatusText:  bot.Messages.Listening,
+	}
+	return task
+}
+
+// createVideoTask creates a task for video messages
+func (h *Hub) createVideoTask(event *IncomingEvent, bot *Bot) *Task {
+	task := &Task{
+		BotID:       event.BotID,
+		Messenger:   event.Messenger,
+		ChatID:      event.ChatID,
+		MessageID:   event.MessageID,
+		FileID:      event.FileID,
+		Status:      StatusDownload,
+		IsVideoNote: true,
+		IsMP3:       event.IsMP3,
+		StatusText:  bot.Messages.Listening,
+	}
+	return task
+}
+
+// createInlineQueryTask creates a task for inline queries
+func (h *Hub) createInlineQueryTask(event *IncomingEvent) *Task {
+	return &Task{
+		BotID:         event.BotID,
+		Messenger:     event.Messenger,
+		ChatID:        event.ChatID,
+		MessageID:     event.MessageID,
+		FileID:        "",
+		Status:        StatusRecap,
+		Wait:          0,
+		AudioData:     nil,
+		Text:          event.Text,
+		IsVideoNote:   false,
+		InlineQueryID: event.InlineQueryID,
+	}
+}
+
+// sendStatusForTask sends status message and updates task
+func (h *Hub) sendStatusForTask(ctx context.Context, task *Task, bot *Bot, statusText string) {
+	if messageID := bot.SendStatus(ctx, task.ChatID, task.MessageID, statusText); messageID != "" {
+		task.StatusMessageID = messageID
+	}
+}
+
+// HandleEvent implements EventSink interface
+func (h *Hub) HandleEvent(ctx context.Context, event *IncomingEvent) {
+	bot, ok := h.bots[event.BotID]
+	if !ok {
+		log.Printf("No bot found for ID %s", event.BotID)
+		return
+	}
+	if !bot.CheckRateLimit(ctx, event) {
+		return
+	}
+
+	var task *Task
+
+	switch event.Type {
+	case EventIncomingVoice:
+		task = h.createVoiceTask(event, bot)
+		h.sendStatusForTask(ctx, task, bot, bot.Messages.Listening)
+
+	case EventIncomingVideo:
+		task = h.createVideoTask(event, bot)
+		h.sendStatusForTask(ctx, task, bot, bot.Messages.Listening)
+
+	case EventInlineQuery:
+		task = h.createInlineQueryTask(event)
+
+	default:
+		log.Printf("Unknown event type: %s", event.Type)
+		return
+	}
+
+	if task != nil {
+		select {
+		case h.taskQueue <- task:
+		default:
+			log.Printf("Task queue full, dropping task for bot %s", task.BotID)
+			// Notify user that bot is overloaded
+			if task.ChatID != "" {
+				bot.SendStatus(ctx, task.ChatID, task.MessageID, "Бот перегружен, попробуйте позже")
+			}
+		}
+	}
+}
+
+// GetTaskQueue returns the task queue for workers
+func (h *Hub) GetTaskQueue() chan *Task {
+	return h.taskQueue
 }
 
 func (h *Hub) Start(ctx context.Context) {
 	log.Printf("Starting hub with %d bots...", len(h.bots))
 
 	for _, bot := range h.bots {
-		go func(m MessengerClient) {
-			if err := m.Start(ctx); err != nil {
-				log.Printf("Messenger client error: %v", err)
+		go func(b *Bot) {
+			if err := b.Start(ctx); err != nil {
+				log.Printf("Bot client error: %v", err)
 			}
 		}(bot)
 	}
@@ -74,7 +176,7 @@ func (h *Hub) Start(ctx context.Context) {
 	log.Printf("Context cancelled, stopping bot: %v", ctx.Err())
 }
 
-func (h *Hub) getBot(botID string) (MessengerClient, error) {
+func (h *Hub) getBot(botID string) (*Bot, error) {
 	bot, ok := h.bots[botID]
 	if !ok {
 		return nil, fmt.Errorf("no bot found for ID %s", botID)
@@ -82,14 +184,12 @@ func (h *Hub) getBot(botID string) (MessengerClient, error) {
 	return bot, nil
 }
 
-func (h *Hub) getBotConfig(botID string) ConfigBot {
-	config, _ := h.botConfigs[botID]
-	return config
-}
-
 func (h *Hub) getPromptForBot(botID string) string {
-	config := h.getBotConfig(botID)
-	return config.Prompt
+	bot, ok := h.bots[botID]
+	if !ok {
+		return ""
+	}
+	return bot.Prompt
 }
 
 func (h *Hub) UpdateMessageForTask(ctx context.Context, task *Task, text string, formatted bool) error {
@@ -97,7 +197,7 @@ func (h *Hub) UpdateMessageForTask(ctx context.Context, task *Task, text string,
 	if err != nil {
 		return err
 	}
-	return bot.UpdateMessage(ctx, task.ChatID, task.StatusMessageID, text, formatted)
+	return bot.Messenger().UpdateMessage(ctx, task.ChatID, task.StatusMessageID, text, formatted)
 }
 
 func (h *Hub) DownloadFileForTask(ctx context.Context, task *Task) (string, []byte, error) {
@@ -107,13 +207,13 @@ func (h *Hub) DownloadFileForTask(ctx context.Context, task *Task) (string, []by
 	}
 
 	// Get file info first
-	fileInfo, err := bot.GetFile(ctx, task.FileID)
+	fileInfo, err := bot.Messenger().GetFile(ctx, task.FileID)
 	if err != nil {
 		return "", nil, err
 	}
 
 	// Download file using filePath
-	return bot.DownloadFile(ctx, fileInfo.FilePath)
+	return bot.Messenger().DownloadFile(ctx, fileInfo.FilePath)
 }
 
 func (h *Hub) Recognize(ctx context.Context, audioData []byte) (string, error) {
@@ -138,7 +238,11 @@ func (h *Hub) addDotToStatus(ctx context.Context, task *Task) {
 
 func (h *Hub) notifyFailure(ctx context.Context, task *Task) {
 	if task.StatusMessageID != "" {
-		if err := h.UpdateMessageForTask(ctx, task, h.messages.FailureMessage, false); err != nil {
+		bot, err := h.getBot(task.BotID)
+		if err != nil {
+			return
+		}
+		if err := h.UpdateMessageForTask(ctx, task, bot.Messages.FailureMessage, false); err != nil {
 			log.Printf("Failed to notify failure: %v", err)
 		}
 	}

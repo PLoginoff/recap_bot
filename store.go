@@ -1,8 +1,8 @@
 package main
 
 import (
-	"log"
 	"os"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v2"
@@ -23,210 +23,132 @@ type ResourceDefaults struct {
 }
 
 type StateStore struct {
-	path   string
-	data   map[string]ResourceStatus
-	saveCh chan struct{}
+	mu       sync.RWMutex
+	data     map[string]ResourceStatus
+	path     string
+	saveChan chan struct{}
 }
 
-func NewStateStore(path string) (*StateStore, error) {
+func NewStateStore(path string) *StateStore {
 	s := &StateStore{
-		path:   path,
-		data:   make(map[string]ResourceStatus),
-		saveCh: make(chan struct{}, 1),
+		data:     make(map[string]ResourceStatus),
+		path:     path,
+		saveChan: make(chan struct{}, 1),
 	}
-
-	if err := s.load(); err != nil {
-		return nil, err
-	}
-
-	go s.saveWorker()
-
-	return s, nil
+	s.load()
+	go s.saveLoop()
+	return s
 }
 
-func (s *StateStore) saveWorker() {
-	for range s.saveCh {
-		s.save()
-	}
-}
-
-func (s *StateStore) load() error {
-	s.data = make(map[string]ResourceStatus)
-
-	file, err := os.Open(s.path)
+func (s *StateStore) load() {
+	f, err := os.Open(s.path)
 	if err != nil {
-		return nil
+		return
 	}
-	defer file.Close()
-
-	var statuses []ResourceStatus
-	if err := yaml.NewDecoder(file).Decode(&statuses); err != nil {
-		return nil
-	}
-
-	for _, status := range statuses {
-		s.data[status.Service+":"+status.ID] = status
-	}
-	return nil
+	defer f.Close()
+	_ = yaml.NewDecoder(f).Decode(&s.data)
 }
 
 func (s *StateStore) save() {
-	file, err := os.Create(s.path)
-	if err != nil {
-		log.Printf("Failed to create state file: %v", err)
-		return
-	}
-	defer file.Close()
-
-	var statuses []ResourceStatus
-	for _, status := range s.data {
-		statuses = append(statuses, status)
-	}
-
-	if err := yaml.NewEncoder(file).Encode(statuses); err != nil {
-		log.Printf("Failed to encode state to file: %v", err)
-	}
-}
-
-func (s *StateStore) triggerSave() {
 	select {
-	case s.saveCh <- struct{}{}:
+	case s.saveChan <- struct{}{}:
 	default:
+		// Save already pending
 	}
 }
 
-func (s *StateStore) Get(service, id string) ResourceStatus {
-	key := s.key(service, id)
-	status, ok := s.data[key]
-	if !ok {
-		status = ResourceStatus{Service: service, ID: id}
-	}
-	return status
-}
-
-func (s *StateStore) List(service string) []ResourceStatus {
-	result := make([]ResourceStatus, 0)
-	for _, status := range s.data {
-		if status.Service == service {
-			result = append(result, status)
+func (s *StateStore) saveLoop() {
+	for range s.saveChan {
+		s.mu.RLock()
+		data := make(map[string]ResourceStatus, len(s.data))
+		for k, v := range s.data {
+			data[k] = v
 		}
-	}
-	return result
-}
+		s.mu.RUnlock()
 
-func (s *StateStore) applyDefaults(status *ResourceStatus, defaults ResourceDefaults) bool {
-	changed := false
-	if status.Cooldown == 0 && defaults.Cooldown > 0 {
-		status.Cooldown = defaults.Cooldown
-		changed = true
-	}
-	if status.Window == 0 && defaults.Limit > 0 {
-		status.Window = defaults.Limit
-		changed = true
-	}
-	return changed
-}
-
-func (s *StateStore) applyCooldown(status *ResourceStatus, defaults ResourceDefaults, now time.Time) {
-	cooldown := status.Cooldown
-	if cooldown == 0 {
-		cooldown = defaults.Cooldown
-	}
-	if cooldown > 0 {
-		status.PausedUntil = now.Add(cooldown)
-	} else {
-		status.PausedUntil = time.Time{}
-	}
-	status.UsedSeconds = 0
-}
-
-func (s *StateStore) normalize(status *ResourceStatus, service, id string) {
-	status.Service = service
-	status.ID = id
-}
-
-func (s *StateStore) Update(service, id string, fn func(*ResourceStatus)) (ResourceStatus, error) {
-	key := s.key(service, id)
-	status, ok := s.data[key]
-	if !ok {
-		status = ResourceStatus{Service: service, ID: id}
-	}
-
-	fn(&status)
-	status.Service = service
-	status.ID = id
-	s.data[key] = status
-
-	s.triggerSave()
-	return status, nil
-}
-
-func (s *StateStore) Acquire(service, id string, defaults ResourceDefaults, now time.Time) (ResourceStatus, bool, error) {
-	key := s.key(service, id)
-	status, ok := s.data[key]
-	if !ok {
-		status = ResourceStatus{Service: service, ID: id}
-	}
-
-	changed := !ok || s.applyDefaults(&status, defaults)
-
-	if !status.PausedUntil.IsZero() && now.After(status.PausedUntil) {
-		status.PausedUntil = time.Time{}
-		status.UsedSeconds = 0
-		changed = true
-	}
-
-	available := status.PausedUntil.IsZero()
-
-	s.normalize(&status, service, id)
-	s.data[key] = status
-
-	if changed {
-		s.triggerSave()
-	}
-
-	return status, available, nil
-}
-
-func (s *StateStore) Release(service, id string, usage time.Duration, defaults ResourceDefaults, success bool, now time.Time) (ResourceStatus, error) {
-	key := s.key(service, id)
-	status, ok := s.data[key]
-	if !ok {
-		status = ResourceStatus{Service: service, ID: id}
-	}
-
-	changed := !ok || s.applyDefaults(&status, defaults)
-
-	if !success {
-		s.applyCooldown(&status, defaults, now)
-		changed = true
-	} else {
-		if usage > 0 {
-			status.UsedSeconds += usage
-			changed = true
+		f, err := os.Create(s.path)
+		if err != nil {
+			continue
 		}
+		yaml.NewEncoder(f).Encode(data)
+		f.Close()
+	}
+}
 
-		limit := status.Window
+func (s *StateStore) Get(svc, id string) ResourceStatus {
+	s.mu.RLock()
+	st := s.data[svc+":"+id]
+	s.mu.RUnlock()
+	if st.Service == "" {
+		return ResourceStatus{Service: svc, ID: id}
+	}
+	return st
+}
+
+func (s *StateStore) Acquire(svc, id string, defs ResourceDefaults, now time.Time) (ResourceStatus, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	st := s.data[svc+":"+id]
+	if st.Cooldown == 0 && defs.Cooldown > 0 {
+		st.Cooldown = defs.Cooldown
+	}
+	if st.Window == 0 && defs.Limit > 0 {
+		st.Window = defs.Limit
+	}
+
+	if !st.PausedUntil.IsZero() && now.After(st.PausedUntil) {
+		st.PausedUntil = time.Time{}
+		st.UsedSeconds = 0
+	}
+
+	avail := st.PausedUntil.IsZero()
+	s.data[svc+":"+id] = st
+	s.save()
+	return st, avail, nil
+}
+
+func (s *StateStore) Release(svc, id string, usage time.Duration, defs ResourceDefaults, ok bool, now time.Time) (ResourceStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	st := s.data[svc+":"+id]
+	if st.Cooldown == 0 && defs.Cooldown > 0 {
+		st.Cooldown = defs.Cooldown
+	}
+	if st.Window == 0 && defs.Limit > 0 {
+		st.Window = defs.Limit
+	}
+
+	if !ok {
+		cd := st.Cooldown
+		if cd == 0 {
+			cd = defs.Cooldown
+		}
+		if cd > 0 {
+			st.PausedUntil = now.Add(cd)
+		}
+		st.UsedSeconds = 0
+	} else {
+		st.UsedSeconds += usage
+		limit := st.Window
 		if limit == 0 {
-			limit = defaults.Limit
+			limit = defs.Limit
 		}
-
-		if limit > 0 && status.UsedSeconds >= limit {
-			s.applyCooldown(&status, defaults, now)
-			changed = true
+		if limit > 0 && st.UsedSeconds >= limit {
+			cd := st.Cooldown
+			if cd == 0 {
+				cd = defs.Cooldown
+			}
+			if cd > 0 {
+				st.PausedUntil = now.Add(cd)
+			}
+			st.UsedSeconds = 0
 		}
 	}
 
-	s.normalize(&status, service, id)
-	s.data[key] = status
-
-	if changed {
-		s.triggerSave()
-	}
-
-	return status, nil
+	s.data[svc+":"+id] = st
+	s.save()
+	return st, nil
 }
 
-func (s *StateStore) key(service, id string) string {
-	return service + ":" + id
-}

@@ -175,7 +175,20 @@ func isSberAuthFatal(err error) bool {
 	return strings.Contains(msg, "401") || strings.Contains(msg, "403")
 }
 
-func (c *SberClient) Recognize(ctx context.Context, audioData []byte) (result string, err error) {
+func (c *SberClient) releaseToken(selection sberTokenSelection, start time.Time, err error) {
+	if c.store == nil || selection.StateKey == "" {
+		return
+	}
+	if err != nil && isSberTemporary(err) {
+		return
+	}
+	usage := time.Since(start)
+	if _, releaseErr := c.store.Release("sber", selection.StateKey, usage, selection.Defaults, err == nil, time.Now()); releaseErr != nil {
+		log.Printf("Sber: failed to release token %s: %v", selection.StateKey, releaseErr)
+	}
+}
+
+func (c *SberClient) Recognize(ctx context.Context, audioData []byte) (string, error) {
 	if len(c.config.Tokens) == 0 {
 		return "", errors.New("no Sber tokens configured")
 	}
@@ -186,21 +199,10 @@ func (c *SberClient) Recognize(ctx context.Context, audioData []byte) (result st
 	}
 
 	start := time.Now()
-	defer func() {
-		if c.store == nil || selection.StateKey == "" {
-			return
-		}
-		if err != nil && isSberTemporary(err) {
-			return
-		}
-		usage := time.Since(start)
-		if _, releaseErr := c.store.Release("sber", selection.StateKey, usage, selection.Defaults, err == nil, time.Now()); releaseErr != nil {
-			log.Printf("Sber: failed to release token %s: %v", selection.StateKey, releaseErr)
-		}
-	}()
 
 	accessToken, err := c.authenticate(ctx, selection.Config)
 	if err != nil {
+		c.releaseToken(selection, start, err)
 		if isSberAuthFatal(err) {
 			return "", err
 		}
@@ -209,24 +211,29 @@ func (c *SberClient) Recognize(ctx context.Context, audioData []byte) (result st
 
 	fileID, err := c.uploadAudioData(ctx, accessToken, audioData)
 	if err != nil {
+		c.releaseToken(selection, start, err)
 		return "", sberTemporaryError{Err: err}
 	}
 
 	taskID, err := c.startAsyncRecognition(ctx, accessToken, fileID)
 	if err != nil {
+		c.releaseToken(selection, start, err)
 		return "", sberTemporaryError{Err: err}
 	}
 
 	resultFileID, err := c.waitForResult(ctx, accessToken, taskID)
 	if err != nil {
+		c.releaseToken(selection, start, err)
 		return "", sberTemporaryError{Err: err}
 	}
 
-	result, err = c.getResult(ctx, accessToken, resultFileID)
+	result, err := c.getResult(ctx, accessToken, resultFileID)
 	if err != nil {
+		c.releaseToken(selection, start, err)
 		return "", sberTemporaryError{Err: err}
 	}
 
+	c.releaseToken(selection, start, nil)
 	return result, nil
 }
 

@@ -21,7 +21,12 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				continue
 			}
 			if task.Wait > 0 {
-				time.Sleep(task.Wait)
+				select {
+				case <-time.After(task.Wait):
+				case <-ctx.Done():
+					log.Printf("Worker %d stopping", id)
+					return
+				}
 				task.Wait = 0
 			}
 
@@ -90,9 +95,43 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 
 			case StatusSent:
 				// Update status message with result - formatting handled by messenger
+				if task.InlineQueryID != "" {
+					bot, err := hub.getBot(task.BotID)
+					if err != nil {
+						loggers.Error.Printf("Worker %d: Failed to get bot: %v", id, err)
+						break
+					}
+					if err := bot.AnswerInlineQuery(ctx, task.InlineQueryID, task.Summary); err != nil {
+						loggers.Error.Printf("Worker %d: Failed to answer inline query: %v", id, err)
+						break
+					}
+					task.Status = StatusDone
+					break
+				}
+				if task.StatusMessageID == "" {
+					bot, err := hub.getBot(task.BotID)
+					if err != nil {
+						loggers.Error.Printf("Worker %d: Failed to get bot: %v", id, err)
+						break
+					}
+					if _, err := bot.Messenger().SendMessage(ctx, task.ChatID, task.MessageID, task.Summary); err != nil {
+						loggers.Error.Printf("Worker %d: Failed to send message: %v", id, err)
+						break
+					}
+					task.Status = StatusDone
+					break
+				}
 				if err := hub.UpdateMessageForTask(ctx, task, task.Summary, true); err != nil {
 					loggers.Error.Printf("Worker %d: Failed to update message: %v", id, err)
-					break
+					bot, getErr := hub.getBot(task.BotID)
+					if getErr != nil {
+						loggers.Error.Printf("Worker %d: Failed to get bot: %v", id, getErr)
+						break
+					}
+					if _, sendErr := bot.Messenger().SendMessage(ctx, task.ChatID, task.MessageID, task.Summary); sendErr != nil {
+						loggers.Error.Printf("Worker %d: Failed to send message after update error: %v", id, sendErr)
+						break
+					}
 				}
 				task.Status = StatusDone
 			}
@@ -107,7 +146,11 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 					loggers.Status.Printf("Worker %d: Sber cooldown until %s, waiting %v", id, cooldownErr.ResumeAt.Format(time.RFC3339), wait)
 					task.Wait = wait
 					// Return task to queue without burning retry attempts
-					taskQueue <- task
+					select {
+					case taskQueue <- task:
+					default:
+						loggers.Error.Printf("Worker %d: Task queue full, dropping cooldown task for message %s", id, task.MessageID)
+					}
 					continue
 				}
 
@@ -115,7 +158,11 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				if errors.As(err, &tempErr) {
 					loggers.Status.Printf("Worker %d: Temporary Sber error for message %s: %v", id, task.MessageID, err)
 					applyRetryBackoff(ctx, hub, task, waitOnError, retryMessage, id)
-					taskQueue <- task
+					select {
+					case taskQueue <- task:
+					default:
+						loggers.Error.Printf("Worker %d: Task queue full, dropping retry task for message %s", id, task.MessageID)
+					}
 					continue
 				}
 
@@ -131,11 +178,19 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				applyRetryBackoff(ctx, hub, task, waitOnError, retryMessage, id)
 
 				// Return task to queue
-				taskQueue <- task
+				select {
+				case taskQueue <- task:
+				default:
+					loggers.Error.Printf("Worker %d: Task queue full, dropping error retry task for message %s", id, task.MessageID)
+				}
 			} else {
 				// Return task to queue for next stage (except for done tasks)
 				if task.Status != StatusDone {
-					taskQueue <- task
+					select {
+					case taskQueue <- task:
+					default:
+						loggers.Error.Printf("Worker %d: Task queue full, dropping next stage task for message %s", id, task.MessageID)
+					}
 				}
 			}
 

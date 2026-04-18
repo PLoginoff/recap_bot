@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,28 +24,27 @@ const telegramAPIURL = "https://api.telegram.org/bot%s/sendMessage"
 const telegramFileURL = "https://api.telegram.org/file/bot%s/%s"
 const telegramGetFileURL = "https://api.telegram.org/bot%s/getFile"
 const telegramEditMessageURL = "https://api.telegram.org/bot%s/editMessageText"
+const telegramAnswerInlineQueryURL = "https://api.telegram.org/bot%s/answerInlineQuery"
 
 const telegramHTTPTimeout = 30 * time.Second
 const telegramDownloadTimeout = 120 * time.Second
 
 type TelegramMessenger struct {
-	botID          string
 	token          string
 	bot            *telegrambot.Bot
-	taskQueue      chan<- *Task
-	rateLimiter    RateLimiter
+	eventHandler   EventHandler
 	messages       ConfigMessages
 	httpClient     *http.Client
 	downloadClient *http.Client
+	debug          bool
 }
 
-func NewTelegramMessenger(botID string, config ConfigBot, taskQueue chan<- *Task, rateLimiter RateLimiter, messages ConfigMessages) *TelegramMessenger {
+func NewTelegramMessenger(token string, messages ConfigMessages, eventHandler EventHandler, debug bool) *TelegramMessenger {
 	return &TelegramMessenger{
-		botID:          botID,
-		token:          config.Token,
-		taskQueue:      taskQueue,
-		rateLimiter:    rateLimiter,
+		token:          token,
 		messages:       messages,
+		eventHandler:   eventHandler,
+		debug:          debug,
 		httpClient:     &http.Client{Timeout: telegramHTTPTimeout},
 		downloadClient: &http.Client{Timeout: telegramDownloadTimeout},
 	}
@@ -71,7 +71,13 @@ func (tc *TelegramMessenger) SendMessage(ctx context.Context, chatID, replyTo, t
 	}
 	data.Set("text", text)
 
-	resp, err := http.PostForm(apiURL, data)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := tc.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -114,7 +120,13 @@ func (tc *TelegramMessenger) UpdateMessage(ctx context.Context, chatID, messageI
 		data.Set("parse_mode", "HTML")
 	}
 
-	resp, err := http.PostForm(apiURL, data)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := tc.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -178,7 +190,13 @@ func (tc *TelegramMessenger) GetFile(ctx context.Context, fileID string) (*FileI
 	data := url.Values{}
 	data.Set("file_id", fileID)
 
-	resp, err := http.PostForm(apiURL, data)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := tc.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -210,22 +228,26 @@ func (tc *TelegramMessenger) GetFile(ctx context.Context, fileID string) (*FileI
 }
 
 func (tc *TelegramMessenger) handleStart(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
+	if tc.debug {
+		log.Printf("[TG] Received /start from chat %d", update.Message.Chat.ID)
+	}
 	if _, err := tc.SendMessage(ctx, strconv.Itoa(update.Message.Chat.ID), "", tc.messages.StartMessage); err != nil {
 		log.Printf("Failed to send start message: %v", err)
 	}
 }
 
 func (tc *TelegramMessenger) handleAllMessages(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
+	if tc.debug && update.Message != nil {
+		log.Printf("[TG] Incoming message from %d", update.Message.From.ID)
+	}
 	if update.Message != nil && update.Message.Voice != nil {
 		tc.handleVoiceMessage(ctx, bot, update)
 		return
 	}
-
 	if update.Message != nil && update.Message.VideoNote != nil {
 		tc.handleVideoNote(ctx, bot, update)
 		return
 	}
-
 	if update.InlineQuery != nil {
 		tc.handleInlineQuery(ctx, bot, update)
 		return
@@ -237,37 +259,23 @@ func (tc *TelegramMessenger) handleVoiceMessage(ctx context.Context, bot *telegr
 	if voice == nil {
 		return
 	}
-
+	if tc.debug {
+		log.Printf("[TG] Voice message from %d, duration: %d sec, file_id: %s", update.Message.From.ID, voice.Duration, voice.FileID)
+	}
 	userID := strconv.Itoa(update.Message.From.ID)
 
-	if !tc.rateLimiter.IsAllowed(userID) {
-		log.Printf("Rate limit exceeded for user %s", userID)
-		tc.SendMessage(ctx, strconv.Itoa(update.Message.Chat.ID), "", tc.messages.RateLimitMessage)
-		return
+	// Send event instead of creating Task
+	event := &IncomingEvent{
+		Type:      EventIncomingVoice,
+		ChatID:    strconv.Itoa(update.Message.Chat.ID),
+		MessageID: strconv.Itoa(update.Message.ID),
+		FileID:    voice.FileID,
+		UserID:    userID,
+		Timestamp: time.Now(),
+		Messenger: MessengerTelegram,
+		IsMP3:     false, // Telegram sends OGG
 	}
-
-	task := &Task{
-		BotID:           tc.botID,
-		Messenger:       MessengerTelegram,
-		ChatID:          strconv.Itoa(update.Message.Chat.ID),
-		MessageID:       strconv.Itoa(update.Message.ID),
-		FileID:          voice.FileID,
-		Status:          StatusDownload,
-		IsVideoNote:     false,
-		IsMP3:           false, // Telegram sends OGG
-		StatusMessageID: "",    // Will be set after sending status message
-		StatusText:      tc.messages.Listening,
-	}
-
-	statusText := tc.messages.Listening
-	if messageID, err := tc.SendMessage(ctx, task.ChatID, task.MessageID, statusText); err != nil {
-		log.Printf("Failed to send thinking message: %v", err)
-	} else {
-		log.Printf("Telegram: sent status message with ID: %s", messageID)
-		task.StatusMessageID = messageID
-	}
-
-	tc.taskQueue <- task
+	tc.eventHandler(ctx, event)
 }
 
 func (tc *TelegramMessenger) handleVideoNote(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
@@ -275,37 +283,23 @@ func (tc *TelegramMessenger) handleVideoNote(ctx context.Context, bot *telegramb
 	if video == nil {
 		return
 	}
-
+	if tc.debug {
+		log.Printf("[TG] Video note from %d, duration: %d sec, file_id: %s", update.Message.From.ID, video.Duration, video.FileID)
+	}
 	userID := strconv.Itoa(update.Message.From.ID)
 
-	if !tc.rateLimiter.IsAllowed(userID) {
-		log.Printf("Rate limit exceeded for user %s", userID)
-		tc.SendMessage(ctx, strconv.Itoa(update.Message.Chat.ID), "", tc.messages.RateLimitMessage)
-		return
+	// Send event instead of creating Task
+	event := &IncomingEvent{
+		Type:      EventIncomingVideo,
+		ChatID:    strconv.Itoa(update.Message.Chat.ID),
+		MessageID: strconv.Itoa(update.Message.ID),
+		FileID:    video.FileID,
+		UserID:    userID,
+		Timestamp: time.Now(),
+		Messenger: MessengerTelegram,
+		IsMP3:     false, // Video notes are MP4
 	}
-
-	task := &Task{
-		BotID:           tc.botID,
-		Messenger:       MessengerTelegram,
-		ChatID:          strconv.Itoa(update.Message.Chat.ID),
-		MessageID:       strconv.Itoa(update.Message.ID),
-		FileID:          video.FileID,
-		Status:          StatusDownload,
-		IsVideoNote:     true,
-		IsMP3:           false, // Video notes are MP4, will be converted
-		StatusMessageID: "",    // Will be set after sending status message
-		StatusText:      tc.messages.Listening,
-	}
-
-	statusText := tc.messages.Listening
-	if messageID, err := tc.SendMessage(ctx, task.ChatID, task.MessageID, statusText); err != nil {
-		log.Printf("Failed to send thinking message for video note: %v", err)
-	} else {
-		task.StatusMessageID = messageID
-		task.StatusText = statusText
-	}
-
-	tc.taskQueue <- task
+	tc.eventHandler(ctx, event)
 }
 
 func (tc *TelegramMessenger) handleInlineQuery(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
@@ -313,25 +307,76 @@ func (tc *TelegramMessenger) handleInlineQuery(ctx context.Context, bot *telegra
 	if query == "" {
 		return
 	}
-
+	if tc.debug {
+		log.Printf("[TG] Inline query from %d: %q", update.InlineQuery.From.ID, query)
+	}
 	userID := strconv.Itoa(update.InlineQuery.From.ID)
 
-	if !tc.rateLimiter.IsAllowed(userID) {
-		log.Printf("Rate limit exceeded for user %s", userID)
-		return
+	// Send event instead of creating Task
+	event := &IncomingEvent{
+		Type:          EventInlineQuery,
+		ChatID:        strconv.Itoa(update.InlineQuery.From.ID),
+		MessageID:     "", // Inline queries don't have message IDs
+		Text:          query,
+		UserID:        userID,
+		Timestamp:     time.Now(),
+		InlineQueryID: update.InlineQuery.ID,
+		Messenger:     MessengerTelegram,
+		IsMP3:         false, // No audio
+	}
+	tc.eventHandler(ctx, event)
+}
+
+func (tc *TelegramMessenger) AnswerInlineQuery(ctx context.Context, inlineQueryID, text string) error {
+	apiURL := fmt.Sprintf(telegramAnswerInlineQueryURL, tc.token)
+	formatted := tc.formatText(text)
+	result := map[string]interface{}{
+		"type":  "article",
+		"id":    "recap",
+		"title": "Recap",
+		"input_message_content": map[string]string{
+			"message_text": formatted,
+			"parse_mode":   "HTML",
+		},
+	}
+	payload := map[string]interface{}{
+		"inline_query_id": inlineQueryID,
+		"results":         []interface{}{result},
+		"cache_time":      0,
+		"is_personal":     true,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
 	}
 
-	task := &Task{
-		Messenger:   MessengerTelegram,
-		ChatID:      strconv.Itoa(update.InlineQuery.From.ID),
-		MessageID:   "",
-		FileID:      "",
-		Status:      StatusRecap,
-		Wait:        0,
-		AudioData:   nil,
-		Text:        query,
-		IsVideoNote: false,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := tc.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
 	}
 
-	tc.taskQueue <- task
+	var apiResponse struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(respBody, &apiResponse); err != nil {
+		return err
+	}
+	if !apiResponse.OK {
+		return fmt.Errorf("telegram API error: %s", apiResponse.Description)
+	}
+
+	return nil
 }

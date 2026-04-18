@@ -31,6 +31,7 @@ type OpenRouterClient struct {
 	store      *StateStore
 	models     []OpenRouterModel
 	httpClient *http.Client
+	debug      bool
 }
 
 type Message struct {
@@ -49,7 +50,7 @@ type OpenRouterResponse struct {
 	} `json:"choices"`
 }
 
-func NewOpenRouterClient(config OpenRouterConfig, store *StateStore) *OpenRouterClient {
+func NewOpenRouterClient(config OpenRouterConfig, store *StateStore, debug bool) *OpenRouterClient {
 	models := make([]OpenRouterModel, 0, len(config.Models))
 	for _, model := range config.Models {
 		models = append(models, normalizeModelConfig(model))
@@ -59,6 +60,7 @@ func NewOpenRouterClient(config OpenRouterConfig, store *StateStore) *OpenRouter
 		config: config,
 		store:  store,
 		models: models,
+		debug:  debug,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -126,15 +128,18 @@ func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, 
 }
 
 func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text string, prompt string) (string, error) {
-	log.Printf("OpenRouter: using model %s", modelName)
-	log.Printf("Text length: %d characters", len(text))
+	if c.debug {
+		log.Printf("[OR] Using model %s, text length: %d chars", modelName, len(text))
+	}
 
 	// Fallback to global prompt if empty
 	if prompt == "" {
 		prompt = c.config.SystemPrompt
 	}
 
-	log.Printf("Prompt: %s", prompt)
+	if c.debug {
+		log.Printf("[OR] Prompt: %s", prompt)
+	}
 
 	reqPayload := Request{
 		Model: modelName,
