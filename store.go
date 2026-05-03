@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -23,17 +24,19 @@ type ResourceDefaults struct {
 }
 
 type StateStore struct {
-	mu       sync.RWMutex
-	data     map[string]ResourceStatus
-	path     string
-	saveChan chan struct{}
+	mu        sync.RWMutex
+	data      map[string]ResourceStatus
+	path      string
+	saveChan  chan struct{}
+	closeChan chan struct{}
 }
 
 func NewStateStore(path string) *StateStore {
 	s := &StateStore{
-		data:     make(map[string]ResourceStatus),
-		path:     path,
-		saveChan: make(chan struct{}, 1),
+		data:      make(map[string]ResourceStatus),
+		path:      path,
+		saveChan:  make(chan struct{}, 1),
+		closeChan: make(chan struct{}),
 	}
 	s.load()
 	go s.saveLoop()
@@ -58,20 +61,42 @@ func (s *StateStore) save() {
 }
 
 func (s *StateStore) saveLoop() {
-	for range s.saveChan {
-		s.mu.RLock()
-		data := make(map[string]ResourceStatus, len(s.data))
-		for k, v := range s.data {
-			data[k] = v
-		}
-		s.mu.RUnlock()
+	for {
+		select {
+		case <-s.saveChan:
+			s.mu.RLock()
+			data := make(map[string]ResourceStatus, len(s.data))
+			for k, v := range s.data {
+				data[k] = v
+			}
+			s.mu.RUnlock()
 
-		f, err := os.Create(s.path)
-		if err != nil {
-			continue
+			// KISS: file write is not atomic
+			f, err := os.Create(s.path)
+			if err != nil {
+				slog.Error("Failed to create state file", "error", err)
+				continue
+			}
+			if err := yaml.NewEncoder(f).Encode(data); err != nil {
+				slog.Error("Failed to encode state", "error", err)
+			}
+			f.Close()
+		case <-s.closeChan:
+			// Save final state before exiting
+			s.mu.RLock()
+			data := make(map[string]ResourceStatus, len(s.data))
+			for k, v := range s.data {
+				data[k] = v
+			}
+			s.mu.RUnlock()
+
+			f, err := os.Create(s.path)
+			if err == nil {
+				yaml.NewEncoder(f).Encode(data)
+				f.Close()
+			}
+			return
 		}
-		yaml.NewEncoder(f).Encode(data)
-		f.Close()
 	}
 }
 
@@ -152,3 +177,6 @@ func (s *StateStore) Release(svc, id string, usage time.Duration, defs ResourceD
 	return st, nil
 }
 
+func (s *StateStore) Close() {
+	close(s.closeChan)
+}

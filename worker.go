@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 )
 
-func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Task, hub *Hub, waitOnError time.Duration, retryMessage string, loggers *Loggers) {
+func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Task, hub *Hub, waitOnError time.Duration, retryMessage string) {
 	defer wg.Done()
 	log.Printf("Worker %d started", id)
 	const maxErrors = 5
@@ -31,7 +32,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 			}
 
 			startTime := time.Now()
-			loggers.Status.Printf("Worker %d: Processing task for message %s, status %s", id, task.MessageID, task.Status)
+			slog.Info("Processing task", "worker", id, "message", task.MessageID, "status", task.Status)
 
 			var err error
 			switch task.Status {
@@ -40,32 +41,32 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				if task.AudioData == nil {
 					_, task.AudioData, err = hub.DownloadFileForTask(ctx, task)
 					if err != nil {
-						loggers.Error.Printf("Worker %d: Failed to download file: %v", id, err)
+						slog.Error("Failed to download file", "worker", id, "error", err)
 						break
 					}
-					loggers.Status.Printf("Worker %d: Downloaded file bytes=%d is_video_note=%t", id, len(task.AudioData), task.IsVideoNote)
+					slog.Debug("Downloaded file", "worker", id, "bytes", len(task.AudioData), "is_video_note", task.IsVideoNote)
 				}
 
 				// Convert video note to audio if needed
 				if task.IsVideoNote {
-					loggers.Status.Printf("Worker %d: Converting video note, input bytes=%d", id, len(task.AudioData))
+					slog.Debug("Converting video note", "worker", id, "input_bytes", len(task.AudioData))
 					task.AudioData, err = convertVideoNote(ctx, hub.ffmpegPath, task.AudioData)
 					if err != nil {
-						loggers.Error.Printf("Worker %d: Failed to convert video note: %v", id, err)
+						slog.Error("Failed to convert video note", "worker", id, "error", err)
 						break
 					}
-					loggers.Status.Printf("Worker %d: Converted video note, output bytes=%d", id, len(task.AudioData))
+					slog.Debug("Converted video note", "worker", id, "output_bytes", len(task.AudioData))
 				}
 
 				// Convert MP3 to OGG for Sber if needed
 				if task.IsMP3 && !task.IsVideoNote {
-					loggers.Status.Printf("Worker %d: Converting MP3 to OGG, input bytes=%d", id, len(task.AudioData))
+					slog.Debug("Converting MP3 to OGG", "worker", id, "input_bytes", len(task.AudioData))
 					task.AudioData, err = convertMP3ToOGG(ctx, hub.ffmpegPath, task.AudioData)
 					if err != nil {
-						loggers.Error.Printf("Worker %d: Failed to convert MP3 to OGG: %v", id, err)
+						slog.Error("Failed to convert MP3 to OGG", "worker", id, "error", err)
 						break
 					}
-					loggers.Status.Printf("Worker %d: Converted MP3 to OGG, output bytes=%d", id, len(task.AudioData))
+					slog.Debug("Converted MP3 to OGG", "worker", id, "output_bytes", len(task.AudioData))
 				}
 
 				task.Status = StatusSTT
@@ -78,7 +79,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				}
 				task.Text, err = hub.Recognize(ctx, task.AudioData)
 				if err != nil {
-					loggers.Error.Printf("Worker %d: Failed to recognize audio: %v", id, err)
+					slog.Error("Failed to recognize audio", "worker", id, "error", err)
 					break
 				}
 				task.Status = StatusRecap
@@ -87,7 +88,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 			case StatusRecap:
 				task.Summary, err = hub.Summarize(ctx, task.Text, task.BotID)
 				if err != nil {
-					loggers.Error.Printf("Worker %d: Failed to summarize text: %v", id, err)
+					slog.Error("Failed to summarize text", "worker", id, "error", err)
 					break
 				}
 				task.Status = StatusSent
@@ -98,11 +99,11 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				if task.InlineQueryID != "" {
 					bot, err := hub.getBot(task.BotID)
 					if err != nil {
-						loggers.Error.Printf("Worker %d: Failed to get bot: %v", id, err)
+						slog.Error("Failed to get bot", "worker", id, "error", err)
 						break
 					}
 					if err := bot.AnswerInlineQuery(ctx, task.InlineQueryID, task.Summary); err != nil {
-						loggers.Error.Printf("Worker %d: Failed to answer inline query: %v", id, err)
+						slog.Error("Failed to answer inline query", "worker", id, "error", err)
 						break
 					}
 					task.Status = StatusDone
@@ -111,25 +112,25 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				if task.StatusMessageID == "" {
 					bot, err := hub.getBot(task.BotID)
 					if err != nil {
-						loggers.Error.Printf("Worker %d: Failed to get bot: %v", id, err)
+						slog.Error("Failed to get bot", "worker", id, "error", err)
 						break
 					}
 					if _, err := bot.Messenger().SendMessage(ctx, task.ChatID, task.MessageID, task.Summary); err != nil {
-						loggers.Error.Printf("Worker %d: Failed to send message: %v", id, err)
+						slog.Error("Failed to send message", "worker", id, "error", err)
 						break
 					}
 					task.Status = StatusDone
 					break
 				}
 				if err := hub.UpdateMessageForTask(ctx, task, task.Summary, true); err != nil {
-					loggers.Error.Printf("Worker %d: Failed to update message: %v", id, err)
+					slog.Error("Failed to update message", "worker", id, "error", err)
 					bot, getErr := hub.getBot(task.BotID)
 					if getErr != nil {
-						loggers.Error.Printf("Worker %d: Failed to get bot: %v", id, getErr)
+						slog.Error("Failed to get bot", "worker", id, "error", getErr)
 						break
 					}
 					if _, sendErr := bot.Messenger().SendMessage(ctx, task.ChatID, task.MessageID, task.Summary); sendErr != nil {
-						loggers.Error.Printf("Worker %d: Failed to send message after update error: %v", id, sendErr)
+						slog.Error("Failed to send message after update error", "worker", id, "error", sendErr)
 						break
 					}
 				}
@@ -143,33 +144,34 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 					if wait < 0 {
 						wait = 0
 					}
-					loggers.Status.Printf("Worker %d: Sber cooldown until %s, waiting %v", id, cooldownErr.ResumeAt.Format(time.RFC3339), wait)
+					slog.Info("Sber cooldown", "worker", id, "until", cooldownErr.ResumeAt, "wait", wait)
 					task.Wait = wait
 					// Return task to queue without burning retry attempts
 					select {
 					case taskQueue <- task:
 					default:
-						loggers.Error.Printf("Worker %d: Task queue full, dropping cooldown task for message %s", id, task.MessageID)
+						slog.Error("Task queue full, dropping cooldown task", "worker", id, "message", task.MessageID)
 					}
 					continue
 				}
 
 				var tempErr sberTemporaryError
 				if errors.As(err, &tempErr) {
-					loggers.Status.Printf("Worker %d: Temporary Sber error for message %s: %v", id, task.MessageID, err)
+					slog.Debug("Temporary Sber error", "worker", id, "message", task.MessageID, "error", err)
+					task.ErrorCount++
 					applyRetryBackoff(ctx, hub, task, waitOnError, retryMessage, id)
 					select {
 					case taskQueue <- task:
 					default:
-						loggers.Error.Printf("Worker %d: Task queue full, dropping retry task for message %s", id, task.MessageID)
+						slog.Error("Task queue full, dropping retry task", "worker", id, "message", task.MessageID)
 					}
 					continue
 				}
 
-				loggers.Error.Printf("Worker %d: Error processing task for message %s, status %s: %v", id, task.MessageID, task.Status, err)
+				slog.Error("Error processing task", "worker", id, "message", task.MessageID, "status", task.Status, "error", err)
 				task.ErrorCount++
 				if task.ErrorCount >= maxErrors {
-					loggers.Error.Printf("Worker %d: Reached max retries for message %s", id, task.MessageID)
+					slog.Error("Reached max retries", "worker", id, "message", task.MessageID)
 					hub.notifyFailure(ctx, task)
 					continue
 				}
@@ -181,7 +183,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 				select {
 				case taskQueue <- task:
 				default:
-					loggers.Error.Printf("Worker %d: Task queue full, dropping error retry task for message %s", id, task.MessageID)
+					slog.Error("Task queue full, dropping error retry task", "worker", id, "message", task.MessageID)
 				}
 			} else {
 				// Return task to queue for next stage (except for done tasks)
@@ -189,15 +191,15 @@ func worker(ctx context.Context, wg *sync.WaitGroup, id int, taskQueue chan *Tas
 					select {
 					case taskQueue <- task:
 					default:
-						loggers.Error.Printf("Worker %d: Task queue full, dropping next stage task for message %s", id, task.MessageID)
+						slog.Error("Task queue full, dropping next stage task", "worker", id, "message", task.MessageID)
 					}
 				}
 			}
 
-			loggers.Status.Printf("Worker %d: Completed task for message %s in %v", id, task.MessageID, time.Since(startTime))
+			slog.Debug("Completed task", "worker", id, "message", task.MessageID, "duration", time.Since(startTime))
 
 		case <-ctx.Done():
-			log.Printf("Worker %d stopping", id)
+			slog.Info("Worker stopping", "worker", id)
 			return
 		}
 	}

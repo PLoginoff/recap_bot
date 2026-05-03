@@ -9,32 +9,32 @@ import (
 // Bot represents a bot instance with its configuration and messenger client.
 // It separates business logic (prompts, messages) from transport layer (messenger).
 type Bot struct {
-	ID           string
-	Prompt       string
-	Messages     ConfigMessages
-	messenger    MessengerClient
-	rateLimiter  RateLimiter
-	eventHandler EventHandler
-	hub          *Hub
+	ID          string
+	Prompt      string
+	Messages    ConfigMessages
+	messenger   MessengerClient
+	rateLimiter RateLimiter
+	hub         *Hub
 }
 
 // NewBot creates a new bot instance with embedded messenger client.
 
 func NewBot(id string, cfg ConfigBot, globalMessages ConfigMessages, hub *Hub, rateLimiter RateLimiter, debug bool) *Bot {
 	bot := &Bot{
-		ID:           id,
-		Prompt:       cfg.Prompt,
-		Messages:     globalMessages,
-		rateLimiter:  rateLimiter,
-		eventHandler: nil,
-		hub:          hub,
+		ID:          id,
+		Prompt:      cfg.Prompt,
+		Messages:    globalMessages,
+		rateLimiter: rateLimiter,
+		hub:         hub,
 	}
 
 	switch cfg.Messenger {
 	case MessengerTelegram:
-		bot.messenger = NewTelegramMessenger(cfg.Token, globalMessages, bot.EventHandler, debug)
+		bot.messenger = NewTelegramMessenger(cfg.Token, globalMessages, hub.HandleEvent, debug)
 	case MessengerMax:
-		bot.messenger = NewMaxMessenger(cfg.Token, globalMessages, bot.EventHandler, debug)
+		bot.messenger = NewMaxMessenger(cfg.Token, globalMessages, hub.HandleEvent, debug)
+	default:
+		log.Fatalf("Unknown messenger type: %s", cfg.Messenger)
 	}
 
 	return bot

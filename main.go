@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -11,24 +12,26 @@ import (
 )
 
 func main() {
-	// Setup loggers
-	loggers, err := setupLoggers()
-	if err != nil {
-		log.Fatalf("Failed to setup loggers: %v", err)
-	}
-
 	// Load configuration
 	config, err := loadConfig("recap.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if config.NumWorkers == 0 {
-		config.NumWorkers = 2
-	}
 	if config.WaitOnError == 0 {
 		config.WaitOnError = 3 * time.Second
 	}
+
+	// Setup slog logger with level based on debug flag
+	logLevel := slog.LevelInfo
+	if config.Debug {
+		logLevel = slog.LevelDebug
+	}
+	opts := &slog.HandlerOptions{
+		Level: logLevel,
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
+	slog.SetDefault(logger)
 
 	// Create shared rate limiter from config
 	rateLimiter := NewDefaultRateLimiter(config.RateLimit.MaxRequests, config.RateLimit.TimeWindow)
@@ -111,7 +114,7 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < config.NumWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, &wg, i, hub.GetTaskQueue(), hub, config.WaitOnError, config.Messages.RetryMessage, loggers)
+		go worker(ctx, &wg, i, hub.GetTaskQueue(), hub, config.WaitOnError, config.Messages.RetryMessage)
 	}
 
 	// Start hub
@@ -121,4 +124,7 @@ func main() {
 	// Wait for all workers to finish
 	wg.Wait()
 	log.Println("All workers stopped.")
+
+	// Gracefully shutdown state store
+	stateStore.Close()
 }

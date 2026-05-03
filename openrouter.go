@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -76,7 +76,7 @@ func normalizeModelConfig(cfg OpenRouterModel) OpenRouterModel {
 }
 
 func (c *OpenRouterClient) Summarize(ctx context.Context, text string, prompt string) (string, error) {
-	log.Printf("Starting summarization, %d models configured", len(c.models))
+	slog.Info("Starting summarization", "models", len(c.models))
 	if len(c.models) == 0 {
 		return "", fmt.Errorf("no OpenRouter models configured")
 	}
@@ -88,7 +88,7 @@ func (c *OpenRouterClient) Summarize(ctx context.Context, text string, prompt st
 			return result, nil
 		}
 		lastErr = err
-		log.Printf("OpenRouter model %s failed: %v", model.Name, err)
+		slog.Debug("OpenRouter model failed", "model", model.Name, "error", err)
 	}
 
 	if lastErr == nil {
@@ -109,7 +109,7 @@ func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, 
 			return "", fmt.Errorf("failed to acquire model %s: %w", model.Name, err)
 		}
 		if !available {
-			log.Printf("OpenRouter model %s paused until %s", model.Name, status.PausedUntil.Format(time.RFC3339))
+			slog.Debug("OpenRouter model paused", "model", model.Name, "until", status.PausedUntil)
 			return "", fmt.Errorf("model %s on cooldown until %s", model.Name, status.PausedUntil.Format(time.RFC3339))
 		}
 	}
@@ -120,7 +120,7 @@ func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, 
 
 	if c.store != nil {
 		if _, releaseErr := c.store.Release("openrouter", model.Name, usage, defaults, err == nil, time.Now()); releaseErr != nil {
-			log.Printf("Failed to update state for model %s: %v", model.Name, releaseErr)
+			slog.Error("Failed to update state for model", "model", model.Name, "error", releaseErr)
 		}
 	}
 
@@ -128,18 +128,18 @@ func (c *OpenRouterClient) tryModel(ctx context.Context, model OpenRouterModel, 
 }
 
 func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text string, prompt string) (string, error) {
-	if c.debug {
-		log.Printf("[OR] Using model %s, text length: %d chars", modelName, len(text))
-	}
+	slog.Debug("Using model", "model", modelName, "text_length", len(text))
 
 	// Fallback to global prompt if empty
 	if prompt == "" {
 		prompt = c.config.SystemPrompt
 	}
-
-	if c.debug {
-		log.Printf("[OR] Prompt: %s", prompt)
+	// Fallback to default prompt if still empty
+	if prompt == "" {
+		prompt = "Create a summary of the following text:\n\n%s"
 	}
+
+	slog.Debug("Prompt", "prompt", prompt)
 
 	reqPayload := Request{
 		Model: modelName,
@@ -197,6 +197,6 @@ func (c *OpenRouterClient) invokeModel(ctx context.Context, modelName, text stri
 	}
 
 	result := response.Choices[0].Message.Content
-	log.Printf("Summarization completed with model %s, result length: %d characters", modelName, len(result))
+	slog.Debug("Summarization completed", "model", modelName, "result_length", len(result))
 	return result, nil
 }

@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -228,17 +229,15 @@ func (tc *TelegramMessenger) GetFile(ctx context.Context, fileID string) (*FileI
 }
 
 func (tc *TelegramMessenger) handleStart(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
-	if tc.debug {
-		log.Printf("[TG] Received /start from chat %d", update.Message.Chat.ID)
-	}
+	slog.Debug("Received /start", "chat", update.Message.Chat.ID)
 	if _, err := tc.SendMessage(ctx, strconv.Itoa(update.Message.Chat.ID), "", tc.messages.StartMessage); err != nil {
 		log.Printf("Failed to send start message: %v", err)
 	}
 }
 
 func (tc *TelegramMessenger) handleAllMessages(ctx context.Context, bot *telegrambot.Bot, update *models.Update) {
-	if tc.debug && update.Message != nil {
-		log.Printf("[TG] Incoming message from %d", update.Message.From.ID)
+	if update.Message != nil {
+		slog.Debug("Incoming message", "from", update.Message.From.ID)
 	}
 	if update.Message != nil && update.Message.Voice != nil {
 		tc.handleVoiceMessage(ctx, bot, update)
@@ -259,9 +258,7 @@ func (tc *TelegramMessenger) handleVoiceMessage(ctx context.Context, bot *telegr
 	if voice == nil {
 		return
 	}
-	if tc.debug {
-		log.Printf("[TG] Voice message from %d, duration: %d sec, file_id: %s", update.Message.From.ID, voice.Duration, voice.FileID)
-	}
+	slog.Debug("Voice message", "from", update.Message.From.ID, "duration", voice.Duration, "file_id", voice.FileID)
 	userID := strconv.Itoa(update.Message.From.ID)
 
 	// Send event instead of creating Task
@@ -283,9 +280,7 @@ func (tc *TelegramMessenger) handleVideoNote(ctx context.Context, bot *telegramb
 	if video == nil {
 		return
 	}
-	if tc.debug {
-		log.Printf("[TG] Video note from %d, duration: %d sec, file_id: %s", update.Message.From.ID, video.Duration, video.FileID)
-	}
+	slog.Debug("Video note", "from", update.Message.From.ID, "duration", video.Duration, "file_id", video.FileID)
 	userID := strconv.Itoa(update.Message.From.ID)
 
 	// Send event instead of creating Task
@@ -307,9 +302,7 @@ func (tc *TelegramMessenger) handleInlineQuery(ctx context.Context, bot *telegra
 	if query == "" {
 		return
 	}
-	if tc.debug {
-		log.Printf("[TG] Inline query from %d: %q", update.InlineQuery.From.ID, query)
-	}
+	slog.Debug("Inline query", "from", update.InlineQuery.From.ID, "query", query)
 	userID := strconv.Itoa(update.InlineQuery.From.ID)
 
 	// Send event instead of creating Task

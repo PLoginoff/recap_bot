@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -184,7 +184,7 @@ func (c *SberClient) releaseToken(selection sberTokenSelection, start time.Time,
 	}
 	usage := time.Since(start)
 	if _, releaseErr := c.store.Release("sber", selection.StateKey, usage, selection.Defaults, err == nil, time.Now()); releaseErr != nil {
-		log.Printf("Sber: failed to release token %s: %v", selection.StateKey, releaseErr)
+		slog.Error("Failed to release token", "key", selection.StateKey, "error", releaseErr)
 	}
 }
 
@@ -263,7 +263,7 @@ func (c *SberClient) selectToken(now time.Time) (sberTokenSelection, error) {
 		if !status.PausedUntil.IsZero() {
 			pausedUntil = status.PausedUntil.Format(time.RFC3339)
 		}
-		log.Printf("Sber token %s: available=%t paused_until=%s used=%s window=%s cooldown=%s", key, available, pausedUntil, status.UsedSeconds, status.Window, status.Cooldown)
+		slog.Debug("Sber token status", "key", key, "available", available, "paused_until", pausedUntil, "used", status.UsedSeconds, "window", status.Window, "cooldown", status.Cooldown)
 		if !available {
 			if !status.PausedUntil.IsZero() && (nextResume.IsZero() || status.PausedUntil.Before(nextResume)) {
 				nextResume = status.PausedUntil
@@ -314,10 +314,10 @@ func (c *SberClient) authenticate(ctx context.Context, token SberTokenConfig) (s
 			return "", fmt.Errorf("sber token requires either client_id+client_secret pair or base64 credentials: %w", err)
 		}
 		basic = token.ClientSecret
-		log.Printf("Sber: authenticating with pre-encoded credentials")
+		slog.Debug("Authenticating with pre-encoded credentials")
 	} else {
 		basic = base64.StdEncoding.EncodeToString([]byte(token.ClientID + ":" + token.ClientSecret))
-		log.Printf("Sber: authenticating with client_id=%s", token.ClientID)
+		slog.Debug("Authenticating with client_id", "client_id", token.ClientID)
 	}
 
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
@@ -345,7 +345,7 @@ func (c *SberClient) authenticate(ctx context.Context, token SberTokenConfig) (s
 		return "", fmt.Errorf("failed to unmarshal auth response: %w", err)
 	}
 
-	log.Printf("Sber: authentication successful, token expires at %v", time.Unix(0, auth.ExpiresAt*int64(time.Millisecond)))
+	slog.Debug("Authentication successful", "expires_at", time.Unix(0, auth.ExpiresAt*int64(time.Millisecond)))
 	return auth.AccessToken, nil
 }
 
@@ -361,7 +361,7 @@ func (c *SberClient) uploadAudioData(ctx context.Context, accessToken string, au
 	}
 
 	sum := sha256.Sum256(audioData)
-	log.Printf("Sber: upload payload size=%d bytes, sha256=%s, head=%s", len(audioData), hex.EncodeToString(sum[:]), strings.ToUpper(hex.EncodeToString(preview)))
+	slog.Debug("Upload payload", "bytes", len(audioData), "sha256", hex.EncodeToString(sum[:]), "head", strings.ToUpper(hex.EncodeToString(preview)))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sberUploadURL, bytes.NewReader(audioData))
 	if err != nil {
@@ -396,7 +396,7 @@ func (c *SberClient) uploadAudioData(ctx context.Context, accessToken string, au
 		return "", errors.New("empty file id returned by upload API")
 	}
 
-	log.Printf("Sber: uploaded file id %s", upload.Result.FileID)
+	slog.Debug("Uploaded file", "file_id", upload.Result.FileID)
 	return upload.Result.FileID, nil
 }
 
@@ -449,7 +449,7 @@ func (c *SberClient) startAsyncRecognition(ctx context.Context, accessToken, fil
 		return "", errors.New("empty task id returned by async recognition API")
 	}
 
-	log.Printf("Sber: async recognition task id %s", result.Result.TaskID)
+	slog.Debug("Async recognition task", "task_id", result.Result.TaskID)
 	return result.Result.TaskID, nil
 }
 
@@ -503,7 +503,7 @@ func (c *SberClient) checkTaskStatus(ctx context.Context, accessToken, taskID st
 
 	preview := previewErrorMessage(body)
 	if preview != "" {
-		log.Printf("Sber: task %s status raw: %s", taskID, preview)
+		slog.Debug("Task status raw", "task", taskID, "status", preview)
 	}
 
 	var status sberTaskStatusResponse
@@ -524,10 +524,10 @@ func (c *SberClient) checkTaskStatus(ctx context.Context, accessToken, taskID st
 
 	if status.Result.Status == "DONE" {
 		if status.Result.ResponseFileID == "" {
-			log.Printf("Sber: task %s completed but response_file_id is empty", taskID)
+			slog.Error("Task completed but response_file_id is empty", "task", taskID)
 			return "", fmt.Errorf("empty recognition result from Sber")
 		}
-		log.Printf("Sber: task %s completed, file id %s", taskID, status.Result.ResponseFileID)
+		slog.Debug("Task completed", "task", taskID, "file_id", status.Result.ResponseFileID)
 		return status.Result.ResponseFileID, nil
 	}
 
@@ -559,7 +559,7 @@ func (c *SberClient) getResult(ctx context.Context, accessToken, fileID string) 
 		return "", fmt.Errorf("sber download error (%s): %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	log.Printf("Sber: getResult response for file %s: %s", fileID, string(body))
+	slog.Debug("getResult response", "file", fileID, "response", string(body))
 
 	var results []sberSpeechResult
 	if err := json.Unmarshal(body, &results); err != nil {
@@ -576,7 +576,7 @@ func (c *SberClient) getResult(ctx context.Context, accessToken, fileID string) 
 	}
 
 	if len(normalized) == 0 {
-		log.Printf("Sber: no normalized text found in results for file %s", fileID)
+		slog.Error("No normalized text found in results", "file", fileID)
 		return "", errors.New("empty recognition result from Sber")
 	}
 
