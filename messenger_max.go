@@ -7,10 +7,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -20,7 +20,10 @@ import (
 
 const MessengerMax MessengerType = "max"
 
-const maxAPIURL = "https://platform-api.max.ru"
+const maxAPIURL = "https://platform-api2.max.ru"
+
+// Skip TLS verification for Max API (required for Russian Trusted CA not in default pool)
+const maxSkipTLSVerify = true
 
 const maxRetryDelay = 3 * time.Second
 const maxDownloadTimeout = 120 * time.Second
@@ -45,9 +48,15 @@ func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHa
 		debug:        debug,
 		httpClient: &http.Client{
 			Timeout: maxHTTPTimeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: maxSkipTLSVerify},
+			},
 		},
 		downloadClient: &http.Client{
 			Timeout: maxDownloadTimeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: maxSkipTLSVerify},
+			},
 		},
 	}
 }
@@ -68,7 +77,7 @@ func (m *MaxMessenger) pollUpdates(ctx context.Context) {
 		default:
 			updates, newMarker, err := m.getUpdates(ctx, marker)
 			if err != nil {
-				log.Printf("Max: error getting updates: %v", err)
+				slog.Warn("Max: error getting updates", "error", err)
 				select {
 				case <-time.After(maxRetryDelay):
 				case <-ctx.Done():
@@ -95,10 +104,12 @@ func (m *MaxMessenger) pollUpdates(ctx context.Context) {
 }
 
 type MaxUpdate struct {
-	UpdateType string       `json:"update_type"`
-	Timestamp  int64        `json:"timestamp"`
-	Message    *MaxMessage  `json:"message"`
-	Callback   *MaxCallback `json:"callback"`
+	UpdateType string          `json:"update_type"`
+	Timestamp  int64           `json:"timestamp"`
+	Message    *MaxMessage     `json:"message"`
+	Callback   *MaxCallback    `json:"callback"`
+	UserLocale string          `json:"user_locale"`
+	Payload    json.RawMessage `json:"payload"` // fallback for unknown structures
 }
 
 type MaxMessage struct {
@@ -173,7 +184,7 @@ type MaxCallback struct {
 }
 
 func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdate, int64, error) {
-	url := fmt.Sprintf("%s/updates?marker=%d&timeout=%d", maxAPIURL, marker, maxUpdatesTimeout)
+	url := fmt.Sprintf("%s/updates?marker=%d&timeout=%d&limit=100&types=message_created,message_callback,bot_started", maxAPIURL, marker, maxUpdatesTimeout)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -196,11 +207,7 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 		return nil, 0, fmt.Errorf("max API error (%s): %s", resp.Status, string(body))
 	}
 
-	responseStr := string(body)
-	if len(responseStr) > 512 {
-		responseStr = responseStr[:512] + "..."
-	}
-	slog.Debug("Raw API response", "response", responseStr)
+	slog.Debug("Raw API response", "response", string(body))
 
 	var response struct {
 		Updates []MaxUpdate `json:"updates"`
@@ -214,14 +221,20 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 }
 
 func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
-	slog.Debug("Processing update", "update", update)
-
-	if update.Message == nil {
-		log.Printf("Max: update.Message is nil")
-		return
-	}
+	slog.Debug("Processing update", "type", update.UpdateType, "message_nil", update.Message == nil, "payload_len", len(update.Payload))
 
 	msg := update.Message
+	if msg == nil && len(update.Payload) > 0 {
+		if err := json.Unmarshal(update.Payload, &msg); err != nil {
+			slog.Debug("Failed to unmarshal payload as message", "error", err)
+		}
+	}
+	if msg == nil {
+		if update.UpdateType == "message_created" || update.UpdateType == "message_callback" {
+			slog.Warn("Max: update has nil message and no payload", "type", update.UpdateType)
+		}
+		return
+	}
 
 	// Check if this is a forwarded message via link field
 	if msg.Link != nil {
@@ -314,7 +327,7 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 
 func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {
 	if _, err := m.SendMessage(ctx, strconv.FormatInt(msg.Recipient.ChatID, 10), "", m.messages.StartMessage); err != nil {
-		log.Printf("Max: failed to send start message: %v", err)
+		slog.Warn("Max: failed to send start message", "error", err)
 	}
 }
 
@@ -398,7 +411,7 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 
 	// If chat_id fails, try user_id format
 	if resp.StatusCode == 400 && strings.Contains(string(body), "Unknown recipient") {
-		log.Printf("Max: chat_id failed, trying user_id format")
+		slog.Debug("Max: chat_id failed, trying user_id format")
 
 		url = fmt.Sprintf("%s/messages?user_id=%d", maxAPIURL, chatIDInt)
 
