@@ -22,14 +22,24 @@ type Config struct {
 	SaveDebugMedia bool                 `yaml:"save_debug_media" default:"false"`
 	Debug          bool                 `yaml:"debug" default:"false"`
 	StateFile      string               `yaml:"state_file" default:"state.txt"`
+	Webhooks       ConfigWebhooks       `yaml:"webhooks"`
 	Bots           map[string]ConfigBot `yaml:"bots"`
 }
 
 type ConfigBot struct {
-	ID        string        `yaml:"id"`
-	Messenger MessengerType `yaml:"messenger"`
-	Token     string        `yaml:"token"`
-	Prompt    string        `yaml:"prompt"`
+	ID          string        `yaml:"id"`
+	Messenger   MessengerType `yaml:"messenger"`
+	Token       string        `yaml:"token"`
+	Prompt      string        `yaml:"prompt"`
+	WebhookPath string        `yaml:"webhook_path"` // e.g. /webhook/max_bot — enables webhook mode for Max
+}
+
+type ConfigWebhooks struct {
+	Listen    string `yaml:"listen"`     // e.g. :8443
+	TLSCert   string `yaml:"tls_cert"`   // path to fullchain.pem or self-signed .crt
+	TLSKey    string `yaml:"tls_key"`    // path to privkey.pem or .key
+	Secret    string `yaml:"secret"`     // optional X-Max-Bot-Api-Secret
+	PublicURL string `yaml:"public_url"` // https://ip:port or https://domain — visible to Max API
 }
 
 type ConfigSber struct {

@@ -92,8 +92,21 @@ func main() {
 
 	openrouterClient := NewOpenRouterClient(openrouterConfig, stateStore, config.Debug)
 
+	// Create shared webhook server if configured
+	var webhookServer *WebhookServer
+	if config.Webhooks.Listen != "" {
+		webhookServer = NewWebhookServer(config.Webhooks.Listen, config.Webhooks.TLSCert, config.Webhooks.TLSKey, config.Webhooks.Secret)
+		if config.Webhooks.PublicURL != "" {
+			webhookServer.SetPublicURL(config.Webhooks.PublicURL)
+		}
+		log.Printf("Webhook server config: listen=%s public_url=%s", config.Webhooks.Listen, config.Webhooks.PublicURL)
+		if err := webhookServer.Start(ctx); err != nil {
+			log.Fatalf("Failed to start webhook server: %v", err)
+		}
+	}
+
 	// Create hub (EventSink)
-	hub, err := NewHub(nil, recognizer, openrouterClient, config.FFmpegPath, config.SaveDebugMedia)
+	hub, err := NewHub(nil, recognizer, openrouterClient, config.FFmpegPath, config.SaveDebugMedia, webhookServer)
 	if err != nil {
 		log.Fatalf("Failed to create hub: %v", err)
 	}

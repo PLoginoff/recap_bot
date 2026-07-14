@@ -43,9 +43,10 @@ type Hub struct {
 	taskQueue      chan *Task
 	ffmpegPath     string
 	saveDebugMedia bool
+	webhookServer  *WebhookServer
 }
 
-func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, ffmpegPath string, saveDebugMedia bool) (*Hub, error) {
+func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, ffmpegPath string, saveDebugMedia bool, webhookServer *WebhookServer) (*Hub, error) {
 	taskQueue := make(chan *Task, 100)
 	return &Hub{
 		bots:           bots,
@@ -54,6 +55,7 @@ func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient 
 		taskQueue:      taskQueue,
 		ffmpegPath:     ffmpegPath,
 		saveDebugMedia: saveDebugMedia,
+		webhookServer:  webhookServer,
 	}, nil
 }
 

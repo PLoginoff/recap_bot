@@ -30,9 +30,13 @@ func NewBot(id string, cfg ConfigBot, globalMessages ConfigMessages, hub *Hub, r
 
 	switch cfg.Messenger {
 	case MessengerTelegram:
-		bot.messenger = NewTelegramMessenger(cfg.Token, globalMessages, hub.HandleEvent, debug)
+		bot.messenger = NewTelegramMessenger(cfg.Token, globalMessages, bot.HandleEvent, debug)
 	case MessengerMax:
-		bot.messenger = NewMaxMessenger(cfg.Token, globalMessages, hub.HandleEvent, debug)
+		var webhookServer *WebhookServer
+		if hub != nil {
+			webhookServer = hub.webhookServer
+		}
+		bot.messenger = NewMaxMessenger(cfg.Token, globalMessages, bot.HandleEvent, debug, webhookServer, cfg.WebhookPath)
 	default:
 		log.Fatalf("Unknown messenger type: %s", cfg.Messenger)
 	}

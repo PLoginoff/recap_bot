@@ -1,7 +1,5 @@
 // Max Messenger client implementation
-// State-mandated messenger in Russia for government oversight
 // Documentation: https://dev.max.ru/
-// Go SDK: https://github.com/max-messenger/max-bot-api-client-go
 package main
 
 import (
@@ -15,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,14 +21,13 @@ const MessengerMax MessengerType = "max"
 
 const maxAPIURL = "https://platform-api2.max.ru"
 
-// Skip TLS verification for Max API (required for Russian Trusted CA not in default pool)
 const maxSkipTLSVerify = true
 
 const maxRetryDelay = 3 * time.Second
 const maxDownloadTimeout = 120 * time.Second
 const maxPollInterval = 2 * time.Second
 const maxHTTPTimeout = 35 * time.Second
-const maxUpdatesTimeout = 29 // seconds for long polling, less than prev
+const maxUpdatesTimeout = 29
 
 type MaxMessenger struct {
 	token          string
@@ -38,32 +36,181 @@ type MaxMessenger struct {
 	httpClient     *http.Client
 	downloadClient *http.Client
 	debug          bool
+
+	// Webhook mode
+	webhookServer *WebhookServer
+	webhookPath   string
+	webhookURL    string // full https://host:port/path sent to Max API
+
+	// Dedup recently processed message IDs to avoid duplicates from Max API retries
+	seenMids map[string]time.Time
+	mu       sync.Mutex
 }
 
-func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHandler, debug bool) *MaxMessenger {
-	return &MaxMessenger{
+// NewMaxMessenger creates a Max messenger. If webhookServer and webhookPath are provided,
+// it runs in webhook mode; otherwise falls back to long polling.
+func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHandler, debug bool, webhookServer *WebhookServer, webhookPath string) *MaxMessenger {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: maxSkipTLSVerify},
+	}
+	m := &MaxMessenger{
 		token:        token,
 		messages:     messages,
 		eventHandler: eventHandler,
 		debug:        debug,
 		httpClient: &http.Client{
-			Timeout: maxHTTPTimeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: maxSkipTLSVerify},
-			},
+			Timeout:   maxHTTPTimeout,
+			Transport: transport,
 		},
 		downloadClient: &http.Client{
-			Timeout: maxDownloadTimeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: maxSkipTLSVerify},
-			},
+			Timeout:   maxDownloadTimeout,
+			Transport: transport,
 		},
+		webhookServer: webhookServer,
+		webhookPath:   webhookPath,
+		seenMids:      make(map[string]time.Time),
 	}
+	if webhookServer != nil && webhookPath != "" {
+		m.webhookURL = buildWebhookURL(webhookServer, webhookPath)
+	}
+	return m
+}
+
+func buildWebhookURL(srv *WebhookServer, path string) string {
+	listen := srv.listen
+	if listen == "" {
+		listen = ":8443"
+	}
+	scheme := "https"
+	if srv.tlsCert == "" || srv.tlsKey == "" {
+		scheme = "http"
+	}
+	if strings.HasPrefix(listen, ":") {
+		if srv.publicURL != "" {
+			return strings.TrimSuffix(srv.publicURL, "/") + path
+		}
+		return scheme + "://localhost" + listen + path
+	}
+	return scheme + "://" + listen + path
 }
 
 func (m *MaxMessenger) Start(ctx context.Context) error {
-	// Start long polling for updates
+	// cleanup old dedup entries periodically
+	go func() {
+		ticker := time.NewTicker(maxDedupAge)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				m.cleanupSeenMids()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	if m.webhookURL != "" {
+		return m.startWebhook(ctx)
+	}
 	go m.pollUpdates(ctx)
+	return nil
+}
+
+func (m *MaxMessenger) startWebhook(ctx context.Context) error {
+	if m.webhookServer == nil {
+		return fmt.Errorf("webhook server not configured")
+	}
+	if m.webhookURL == "" {
+		return fmt.Errorf("webhook URL is empty (check webhooks.public_url in config)")
+	}
+	if strings.Contains(m.webhookURL, "localhost") || strings.Contains(m.webhookURL, "127.0.0.1") {
+		return fmt.Errorf("webhook URL must be a public address, not localhost: %s", m.webhookURL)
+	}
+
+	// Register raw MaxUpdate handler on the shared webhook server
+	m.webhookServer.RegisterMaxHandler(m.webhookPath, func(ctx context.Context, update *MaxUpdate) {
+		m.handleUpdate(ctx, update)
+	})
+
+	// Unsubscribe any existing webhook to prevent duplicate deliveries
+	if err := m.unsubscribeWebhook(ctx); err != nil {
+		slog.Debug("Max: no existing subscription to clean up", "error", err)
+	}
+
+	// Log the URL we're about to subscribe with
+	slog.Info("Max: subscribing webhook", "url", m.webhookURL)
+
+	// Subscribe with Max API
+	if err := m.subscribeWebhook(ctx); err != nil {
+		slog.Warn("Max: failed to subscribe webhook, falling back to polling", "error", err, "url", m.webhookURL)
+		go m.pollUpdates(ctx)
+		return nil
+	}
+
+	slog.Info("Max: webhook active", "url", m.webhookURL)
+	return nil
+}
+
+func (m *MaxMessenger) subscribeWebhook(ctx context.Context) error {
+	payload := map[string]interface{}{
+		"url":          m.webhookURL,
+		"update_types": []string{"message_created", "message_callback", "bot_started"},
+	}
+	if m.webhookServer != nil && m.webhookServer.secret != "" {
+		payload["secret"] = m.webhookServer.secret
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, maxAPIURL+"/subscriptions", bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", m.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("subscribe failed (%s): %s", resp.Status, string(respBody))
+	}
+
+	var result struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return err
+	}
+	if !result.Success {
+		return fmt.Errorf("subscribe failed: %s", result.Message)
+	}
+
+	slog.Info("Max: webhook subscribed", "url", m.webhookURL)
+	return nil
+}
+
+func (m *MaxMessenger) unsubscribeWebhook(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, maxAPIURL+"/subscriptions", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", m.token)
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unsubscribe failed (%s): %s", resp.Status, string(body))
+	}
 	return nil
 }
 
@@ -91,7 +238,7 @@ func (m *MaxMessenger) pollUpdates(ctx context.Context) {
 			}
 
 			for _, update := range updates {
-				m.handleUpdate(ctx, update)
+				m.handleUpdate(ctx, &update)
 			}
 
 			select {
@@ -109,19 +256,17 @@ type MaxUpdate struct {
 	Message    *MaxMessage     `json:"message"`
 	Callback   *MaxCallback    `json:"callback"`
 	UserLocale string          `json:"user_locale"`
-	Payload    json.RawMessage `json:"payload"` // fallback for unknown structures
+	Payload    json.RawMessage `json:"payload"`
 }
 
 type MaxMessage struct {
-	Mid       string         `json:"mid"`
-	Recipient MaxRecipient   `json:"recipient"`
-	Sender    MaxSender      `json:"sender"`
-	Timestamp int64          `json:"timestamp"`
-	Body      MaxMessageBody `json:"body"`
-	// Attachments at message level (for forwarded messages)
+	Mid         string          `json:"mid"`
+	Recipient   MaxRecipient    `json:"recipient"`
+	Sender      MaxSender       `json:"sender"`
+	Timestamp   int64           `json:"timestamp"`
+	Body        MaxMessageBody  `json:"body"`
 	Attachments []MaxAttachment `json:"attachments,omitempty"`
-	// Link for forwarded/replied messages
-	Link *MaxLink `json:"link,omitempty"`
+	Link        *MaxLink        `json:"link,omitempty"`
 }
 
 type MaxRecipient struct {
@@ -160,31 +305,16 @@ type MaxAttachmentPayload struct {
 	ID    int64  `json:"id"`
 }
 
-type MaxAudio struct {
-	FileID   string `json:"file_id"`
-	FileSize int64  `json:"file_size"`
-	Duration int    `json:"duration"`
-}
-
-type MaxVoice struct {
-	FileID   string `json:"file_id"`
-	FileSize int64  `json:"file_size"`
-	Duration int    `json:"duration"`
-}
-
-type MaxVideoNote struct {
-	FileID   string `json:"file_id"`
-	FileSize int64  `json:"file_size"`
-	Duration int    `json:"duration"`
-}
-
 type MaxCallback struct {
 	CallbackID string     `json:"callback_id"`
 	Message    MaxMessage `json:"message"`
 }
 
 func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdate, int64, error) {
-	url := fmt.Sprintf("%s/updates?marker=%d&timeout=%d&limit=100&types=message_created,message_callback,bot_started", maxAPIURL, marker, maxUpdatesTimeout)
+	url := fmt.Sprintf("%s/updates?timeout=%d&limit=100", maxAPIURL, maxUpdatesTimeout)
+	if marker > 0 {
+		url += fmt.Sprintf("&marker=%d", marker)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -207,26 +337,73 @@ func (m *MaxMessenger) getUpdates(ctx context.Context, marker int64) ([]MaxUpdat
 		return nil, 0, fmt.Errorf("max API error (%s): %s", resp.Status, string(body))
 	}
 
-	slog.Debug("Raw API response", "response", string(body))
-
-	var response struct {
-		Updates []MaxUpdate `json:"updates"`
-		Marker  int64       `json:"marker"`
+	var rawResponse struct {
+		Updates []json.RawMessage `json:"updates"`
+		Marker  int64             `json:"marker"`
 	}
-	if err := json.Unmarshal(body, &response); err != nil {
+	if err := json.Unmarshal(body, &rawResponse); err != nil {
 		return nil, 0, err
 	}
 
-	return response.Updates, response.Marker, nil
+	updates := make([]MaxUpdate, 0, len(rawResponse.Updates))
+	for _, raw := range rawResponse.Updates {
+		if m.debug {
+			slog.Debug("Raw update JSON", "json", string(raw))
+		}
+		var update MaxUpdate
+		if err := json.Unmarshal(raw, &update); err != nil {
+			slog.Warn("Failed to unmarshal update", "error", err, "raw", string(raw))
+			continue
+		}
+		updates = append(updates, update)
+	}
+
+	return updates, rawResponse.Marker, nil
 }
 
-func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
-	slog.Debug("Processing update", "type", update.UpdateType, "message_nil", update.Message == nil, "payload_len", len(update.Payload))
+const maxDedupAge = 5 * time.Minute
 
+func (m *MaxMessenger) dedupMid(mid string) bool {
+	if mid == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ts, ok := m.seenMids[mid]; ok && time.Since(ts) < maxDedupAge {
+		return true // duplicate
+	}
+	m.seenMids[mid] = time.Now()
+	return false
+}
+
+func (m *MaxMessenger) cleanupSeenMids() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := time.Now().Add(-maxDedupAge)
+	for mid, ts := range m.seenMids {
+		if ts.Before(cutoff) {
+			delete(m.seenMids, mid)
+		}
+	}
+}
+
+func (m *MaxMessenger) handleUpdate(ctx context.Context, update *MaxUpdate) {
 	msg := update.Message
 	if msg == nil && len(update.Payload) > 0 {
-		if err := json.Unmarshal(update.Payload, &msg); err != nil {
-			slog.Debug("Failed to unmarshal payload as message", "error", err)
+		var wrapper struct {
+			Message *MaxMessage `json:"message"`
+		}
+		if err := json.Unmarshal(update.Payload, &wrapper); err == nil && wrapper.Message != nil {
+			msg = wrapper.Message
+			if m.debug {
+				slog.Debug("Found message inside payload wrapper")
+			}
+		} else {
+			if err := json.Unmarshal(update.Payload, &msg); err != nil {
+				if m.debug {
+					slog.Debug("Failed to unmarshal payload", "error", err)
+				}
+			}
 		}
 	}
 	if msg == nil {
@@ -236,42 +413,40 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 		return
 	}
 
-	// Check if this is a forwarded message via link field
-	if msg.Link != nil {
-		slog.Debug("Link found in message", "type", msg.Link.Type)
-		if msg.Link.Type == "forward" {
-			slog.Debug("Forwarded message detected via link", "link", msg.Link)
+	// dedup: Max API retries can deliver the same update multiple times
+	if m.dedupMid(msg.Body.Mid) {
+		slog.Debug("Max: duplicate mid, skipping", "mid", msg.Body.Mid)
+		return
+	}
 
-			// Check attachments in the linked message at message level
+	if m.debug {
+		slog.Debug("Processing update", "type", update.UpdateType, "timestamp", update.Timestamp, "mid", msg.Body.Mid, "sender_id", msg.Sender.UserID)
+	}
+
+	if msg.Link != nil {
+		if m.debug {
+			slog.Debug("Link found in message", "type", msg.Link.Type)
+		}
+		if msg.Link.Type == "forward" {
 			if len(msg.Link.Message.Attachments) > 0 {
-				slog.Debug("Found attachments at message level in forwarded message", "count", len(msg.Link.Message.Attachments))
-				for i, attachment := range msg.Link.Message.Attachments {
-					slog.Debug("Forwarded attachment", "index", i, "type", attachment.Type, "payload", attachment.Payload)
+				for _, attachment := range msg.Link.Message.Attachments {
 					if attachment.Type == "audio" || attachment.Type == "voice" {
-						slog.Debug("Found audio/voice attachment in forwarded message")
 						m.handleAudioAttachment(ctx, msg, attachment)
 						return
 					}
 					if attachment.Type == "video" {
-						slog.Debug("Found video attachment in forwarded message")
 						m.handleVideoAttachment(ctx, msg, attachment)
 						return
 					}
 				}
 			}
-
-			// Also check attachments in the linked message body
 			if len(msg.Link.Message.Body.Attachments) > 0 {
-				slog.Debug("Found attachments in body of forwarded message", "count", len(msg.Link.Message.Body.Attachments))
-				for i, attachment := range msg.Link.Message.Body.Attachments {
-					slog.Debug("Forwarded body attachment", "index", i, "type", attachment.Type, "payload", attachment.Payload)
+				for _, attachment := range msg.Link.Message.Body.Attachments {
 					if attachment.Type == "audio" || attachment.Type == "voice" {
-						slog.Debug("Found audio/voice attachment in forwarded message body")
 						m.handleAudioAttachment(ctx, msg, attachment)
 						return
 					}
 					if attachment.Type == "video" {
-						slog.Debug("Found video attachment in forwarded message body")
 						m.handleVideoAttachment(ctx, msg, attachment)
 						return
 					}
@@ -280,49 +455,41 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update MaxUpdate) {
 		}
 	}
 
-	slog.Debug("Message body structure", "body", msg.Body)
-
-	// Handle text commands
 	if msg.Body.Text == "/start" {
 		m.handleStart(ctx, msg)
 		return
 	}
 
-	// Handle attachments (voice/audio/video) in main message
-	slog.Debug("Checking attachments in main message", "count", len(msg.Body.Attachments))
-	for i, attachment := range msg.Body.Attachments {
-		slog.Debug("Attachment", "index", i, "type", attachment.Type, "payload", attachment.Payload)
+	for _, attachment := range msg.Body.Attachments {
+		if m.debug {
+			slog.Debug("Attachment", "type", attachment.Type)
+		}
 		if attachment.Type == "audio" || attachment.Type == "voice" {
-			slog.Debug("Found audio/voice attachment in main message")
 			m.handleAudioAttachment(ctx, msg, attachment)
 			return
 		}
 		if attachment.Type == "video" {
-			slog.Debug("Found video attachment in main message")
 			m.handleVideoAttachment(ctx, msg, attachment)
 			return
 		}
 	}
 
-	// Also check attachments at message level (for some message types)
 	if len(msg.Attachments) > 0 {
-		slog.Debug("Found attachments at message level", "count", len(msg.Attachments))
-		for i, attachment := range msg.Attachments {
-			slog.Debug("Message level attachment", "index", i, "type", attachment.Type, "payload", attachment.Payload)
+		for _, attachment := range msg.Attachments {
 			if attachment.Type == "audio" || attachment.Type == "voice" {
-				slog.Debug("Found audio/voice attachment at message level")
 				m.handleAudioAttachment(ctx, msg, attachment)
 				return
 			}
 			if attachment.Type == "video" {
-				slog.Debug("Found video attachment at message level")
 				m.handleVideoAttachment(ctx, msg, attachment)
 				return
 			}
 		}
 	}
 
-	slog.Debug("No audio/voice/video attachments found in message, link, or body")
+	if m.debug {
+		slog.Debug("No audio/voice/video attachments found")
+	}
 }
 
 func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {
@@ -332,7 +499,6 @@ func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {
 }
 
 func (m *MaxMessenger) handleAudioAttachment(ctx context.Context, msg *MaxMessage, attachment MaxAttachment) {
-	// Send event instead of creating Task
 	event := &IncomingEvent{
 		Type:      EventIncomingVoice,
 		ChatID:    strconv.FormatInt(msg.Recipient.ChatID, 10),
@@ -341,13 +507,12 @@ func (m *MaxMessenger) handleAudioAttachment(ctx context.Context, msg *MaxMessag
 		UserID:    strconv.FormatInt(msg.Sender.UserID, 10),
 		Timestamp: time.Now(),
 		Messenger: MessengerMax,
-		IsMP3:     true, // Max sends MP3
+		IsMP3:     true,
 	}
 	m.eventHandler(ctx, event)
 }
 
 func (m *MaxMessenger) handleVideoAttachment(ctx context.Context, msg *MaxMessage, attachment MaxAttachment) {
-	// Send event instead of creating Task
 	event := &IncomingEvent{
 		Type:      EventIncomingVideo,
 		ChatID:    strconv.FormatInt(msg.Recipient.ChatID, 10),
@@ -356,7 +521,7 @@ func (m *MaxMessenger) handleVideoAttachment(ctx context.Context, msg *MaxMessag
 		UserID:    strconv.FormatInt(msg.Sender.UserID, 10),
 		Timestamp: time.Now(),
 		Messenger: MessengerMax,
-		IsMP3:     false, // Video notes are MP4
+		IsMP3:     false,
 	}
 	m.eventHandler(ctx, event)
 }
@@ -367,14 +532,12 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 		return "", fmt.Errorf("invalid chat ID: %v", err)
 	}
 
-	// According to Max API docs, user_id/chat_id should be query parameters, not in body
-	url := fmt.Sprintf("%s/messages?chat_id=%d", maxAPIURL, chatIDInt)
+	apiURL := fmt.Sprintf("%s/messages?chat_id=%d", maxAPIURL, chatIDInt)
 
 	requestBody := map[string]interface{}{
 		"text": text,
 	}
 
-	// Add reply attachment if replyTo is provided
 	if replyTo != "" {
 		requestBody["link"] = map[string]interface{}{
 			"type": "reply",
@@ -387,9 +550,7 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 		return "", err
 	}
 
-	slog.Debug("SendMessage request", "url", url, "body", string(jsonBody))
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return "", err
 	}
@@ -407,17 +568,9 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 		return "", err
 	}
 
-	slog.Debug("SendMessage response", "status", resp.Status, "body", string(body))
-
-	// If chat_id fails, try user_id format
 	if resp.StatusCode == 400 && strings.Contains(string(body), "Unknown recipient") {
-		slog.Debug("Max: chat_id failed, trying user_id format")
-
-		url = fmt.Sprintf("%s/messages?user_id=%d", maxAPIURL, chatIDInt)
-
-		slog.Debug("SendMessage retry URL", "url", url)
-
-		req, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+		apiURL = fmt.Sprintf("%s/messages?user_id=%d", maxAPIURL, chatIDInt)
+		req, err = http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonBody))
 		if err != nil {
 			return "", err
 		}
@@ -434,8 +587,6 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 		if err != nil {
 			return "", err
 		}
-
-		slog.Debug("SendMessage retry response", "status", resp.Status, "body", string(body))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -461,19 +612,15 @@ func (m *MaxMessenger) SendMessage(ctx context.Context, chatID, replyTo, text st
 }
 
 func (m *MaxMessenger) UpdateMessage(ctx context.Context, chatID, messageID, text string, formatted bool) error {
-	// Apply formatting only for final result
 	if formatted {
 		text = m.formatText(text)
 	}
 
-	// Max API requires message_id as query parameter
-	url := fmt.Sprintf("%s/messages?message_id=%s", maxAPIURL, messageID)
+	apiURL := fmt.Sprintf("%s/messages?message_id=%s", maxAPIURL, messageID)
 
 	requestBody := map[string]interface{}{
 		"text": text,
 	}
-
-	// Enable HTML formatting only for final result
 	if formatted {
 		requestBody["format"] = "html"
 	}
@@ -483,9 +630,7 @@ func (m *MaxMessenger) UpdateMessage(ctx context.Context, chatID, messageID, tex
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	slog.Debug("UpdateMessage", "url", url, "body", string(jsonBody))
-
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "PUT", apiURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -503,8 +648,6 @@ func (m *MaxMessenger) UpdateMessage(ctx context.Context, chatID, messageID, tex
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	slog.Debug("UpdateMessage response", "status", resp.Status, "body", string(body))
-
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("max API error (%s): %s", resp.Status, string(body))
 	}
@@ -512,9 +655,7 @@ func (m *MaxMessenger) UpdateMessage(ctx context.Context, chatID, messageID, tex
 	return nil
 }
 
-// formatText formats text for Max messenger (bullet points + italics, no blockquote)
 func (m *MaxMessenger) formatText(text string) string {
-	// Convert multi-paragraph text to bullet points
 	paragraphs := strings.Split(text, "\n\n")
 	if len(paragraphs) <= 1 {
 		return fmt.Sprintf("<i>%s</i>", text)
@@ -523,10 +664,8 @@ func (m *MaxMessenger) formatText(text string) string {
 	var builder strings.Builder
 	for i, para := range paragraphs {
 		if i == 0 {
-			// First paragraph as main point
 			builder.WriteString(strings.TrimSpace(para))
 		} else {
-			// Other paragraphs as bullet points
 			lines := strings.Split(strings.TrimSpace(para), "\n")
 			for _, line := range lines {
 				if trimmed := strings.TrimSpace(line); trimmed != "" {
@@ -541,17 +680,13 @@ func (m *MaxMessenger) formatText(text string) string {
 }
 
 func (m *MaxMessenger) GetFile(ctx context.Context, fileID string) (*FileInfo, error) {
-	// Max API doesn't have separate get file info endpoint
-	// We need to use the URL directly from the attachment payload
-	// For Max, fileID is actually the URL
 	return &FileInfo{
-		FilePath: fileID, // This is the URL from attachment payload
-		FileSize: 0,      // Unknown size
+		FilePath: fileID,
+		FileSize: 0,
 	}, nil
 }
 
 func (m *MaxMessenger) DownloadFile(ctx context.Context, filePath string) (string, []byte, error) {
-	// For Max, filePath is actually the direct URL from attachment payload
 	req, err := http.NewRequestWithContext(ctx, "GET", filePath, nil)
 	if err != nil {
 		return "", nil, err

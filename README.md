@@ -38,7 +38,7 @@ Telegram бот для создания краткого содержания и
 
 Для поддержки видео-кружочков нужен установленный `ffmpeg` (по умолчанию используется бинарь из PATH).
 
-3. Скопируйте `recap.example.dist` в `recap.yaml` и обновите его:
+3. Скопируйте `recap.example.yaml` в `recap.yaml` и обновите его:
 
 4. Вы можете собрать сами или скачать бирань на свой сервер
 
@@ -46,6 +46,17 @@ Telegram бот для создания краткого содержания и
 wget https://github.com/ploginoff/recap_bot/releases/download/v2.2/recap_x64.tar.gz
 tar xfz recap_x64.tar.gz
 ./recap
+```
+
+### Дополнительные опции конфига
+
+```yaml
+debug: false              # Включить debug-логи (по умолчанию false)
+save_debug_media: false   # Сохранять входящие аудио в папку debug/ (для отладки)
+num_workers: 2            # Количество воркеров, обрабатывающих очередь
+wait_on_error: 3s         # Пауза между повторными попытками
+ffmpeg_path: ffmpeg       # Путь к ffmpeg (если не в PATH)
+state_file: state.txt     # Файл для хранения состояния токенов/моделей
 ```
 
 ### Формат `state.txt`
@@ -72,11 +83,75 @@ tar xfz recap_x64.tar.gz
 
 *Для других мессенджеров настройки групп могут отличаться. Но часто нужны права на чтение сообщений.*
 
+## Нюансы Max Messenger
+
+### Webhook vs Long Polling
+
+Max API поддерживает два способа получения событий:
+
+* **Webhook** (рекомендуется для production): Max сам шлет полный `Update` JSON на твой HTTPS endpoint. Это единственный способ получить тело сообщения (`message`) в 2026 году.
+* **Long Polling** (`GET /updates`): можно использовать для разработки, но события возвращаются **без тела сообщения** — только `timestamp` и `update_type`. Это известное ограничение, подтвержденное поведением API.
+
+### Настройка webhook для Max
+
+**Важно:** с 25 мая 2026 Max API **не принимает самоподписанные сертификаты** и **IP-адреса** в webhook URL. Нужен **домен** + сертификат от доверенного CA (Let's Encrypt и др.).
+
+1. Получи домен (DDNS или свой). DuckDNS может глючить (SERVFAIL), рекомендуется no-ip.com или покупной домен.
+
+2. Получи сертификат Let's Encrypt (требуется открытый порт 80 на момент выпуска):
+   ```bash
+   sudo certbot certonly --standalone -d your-domain.ru -m your@email.com --agree-tos
+   ```
+
+3. В `recap.yaml` добавь глобальный блок `webhooks` и `webhook_path` для каждого Max-бота:
+   ```yaml
+   webhooks:
+     listen: :443                    # только порт 443, другие Max не принимает
+     tls_cert: /etc/letsencrypt/live/your-domain.ru/fullchain.pem
+     tls_key: /etc/letsencrypt/live/your-domain.ru/privkey.pem
+     public_url: https://your-domain.ru   # без порта, 443 — дефолтный
+     # secret: optional-secret      # опционально, проверяет X-Max-Bot-Api-Secret
+
+   bots:
+     recap_max:
+       messenger: max
+       token: TOKEN
+       webhook_path: /max/recap    # включает webhook-режим
+   ```
+
+4. Если слушаешь на `:443`, нужен root. Либо используй `setcap`:
+   ```bash
+   sudo setcap cap_net_bind_service=+ep ./recap
+   ```
+
+5. Запусти бота. Он сам подпишется на webhook (`POST /subscriptions`) при старте и отпишется (`DELETE /subscriptions`) при остановке. Убедись, что порт открыт наружу (firewall).
+
+### Почему Max API шлет дубли
+
+Max API ожидает, что webhook endpoint вернет `HTTP 200 OK` в течение **30 секунд**. Если ответа нет — он повторяет доставку (до 10 попыток с экспоненциальной задержкой). Бот обрабатывает событие **асинхронно**: мгновенно отвечает `200 OK`, а обработку (скачивание, ffmpeg, STT, summary) выполняет в фоне через task queue. В коде также реализована **дедупликация** по `message_id` — повторные доставки того же сообщения игнорируются.
+
+### Если webhook не подписывается
+
+* Проверь, что `public_url` доступен извне:
+  ```bash
+  curl -v https://your-domain.ru/max/recap
+  ```
+* **"Field 'url' is not a valid URL"** — скорее всего IP вместо домена или нестандартный порт в `public_url`.
+* **"wrong version number"** — бот слушает HTTP вместо HTTPS (проверь пути к `tls_cert`/`tls_key` в конфиге).
+* Проверь активные подписки:
+  ```bash
+  curl -H "Authorization: TOKEN" https://platform-api2.max.ru/subscriptions
+  ```
+* Удали старые подписки (дубли вызывают повторную доставку):
+  ```bash
+  curl -X DELETE -H "Authorization: TOKEN" https://platform-api2.max.ru/subscriptions
+  ```
+* DuckDNS может возвращать `SERVFAIL` — если certbot падает на DNS-валидации, попробуй no-ip.com или подожди 30–60 минут.
+
 ## Структура проекта
 
 - `main.go` - точка входа, настройка и запуск
 - `config.go` - конфигурация и типы
-- `logger.go` - настройка логирования
 - `worker.go` - обработка задач в воркерах
 - `hub.go` - координация компонентов
 - `bot.go` - слой бота, разделяющий бизнес-логику и транспорт

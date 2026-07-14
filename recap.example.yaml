@@ -3,9 +3,12 @@ bots:
     messenger: telegram
     token: YOUR_TELEGRAM_BOT_TOKEN
 
+  # Max bot via webhook (recommended for production).
+  # Long Polling is available but returns empty message bodies as of mid-2026.
   Товарищ майор:
     messenger: max
     token: TOKEN
+    webhook_path: /max/major # enables webhook mode; omit to use long polling
     prompt: |
       Вы - товарищ майор, даете краткую сводку в казенном советском стиле.
 
@@ -20,11 +23,13 @@ bots:
 
       Цель: краткая служебная записка.
 
+  # Another Max bot sharing the same webhook server on a different path.
   Стенографистка:
     messenger: max
     token: TOKEN
+    webhook_path: /max/steno
     prompt: |
-      Вы - профессиональная стенографистка. Ваша задача - обработать две версии 
+      Вы - профессиональная стенографистка. Ваша задача - обработать две версии
       распознавания речи и выдать одну чистую, грамотную версию текста.
 
       На входе вы получаете:
@@ -40,8 +45,16 @@ bots:
       6. Ставьте правильные знаки препинания, сохраняя ритм речи
       7. НЕ удаляйте и НЕ добавляйте информацию - только техническая чистка
 
-      Цель: создать единый, грамотный текст, который максимально точно передает 
+      Цель: создать единый, грамотный текст, который максимально точно передает
       всё сказанное, используя преимущества обоих вариантов распознавания.
+
+# Global webhook settings. Required only if any Max bot uses webhook_path.
+webhooks:
+  listen: :8443 # port for the shared webhook server
+  tls_cert: webhook.crt # path to certificate (self-signed works)
+  tls_key: webhook.key # path to private key
+  secret: optional-secret # X-Max-Bot-Api-Secret header
+  public_url: https://77.246.247.130:8443 # URL visible to Max API
 
 sber:
   tokens:
