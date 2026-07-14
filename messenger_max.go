@@ -159,7 +159,10 @@ func (m *MaxMessenger) subscribeWebhook(ctx context.Context) error {
 	if m.webhookServer != nil && m.webhookServer.secret != "" {
 		payload["secret"] = m.webhookServer.secret
 	}
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal subscription payload: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, maxAPIURL+"/subscriptions", bytes.NewBuffer(body))
 	if err != nil {
@@ -174,7 +177,10 @@ func (m *MaxMessenger) subscribeWebhook(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read subscription response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("subscribe failed (%s): %s", resp.Status, string(respBody))
 	}
@@ -428,29 +434,11 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update *MaxUpdate) {
 			slog.Debug("Link found in message", "type", msg.Link.Type)
 		}
 		if msg.Link.Type == "forward" {
-			if len(msg.Link.Message.Attachments) > 0 {
-				for _, attachment := range msg.Link.Message.Attachments {
-					if attachment.Type == "audio" || attachment.Type == "voice" {
-						m.handleAudioAttachment(ctx, msg, attachment)
-						return
-					}
-					if attachment.Type == "video" {
-						m.handleVideoAttachment(ctx, msg, attachment)
-						return
-					}
-				}
+			if m.tryAttachments(ctx, msg, msg.Link.Message.Attachments) {
+				return
 			}
-			if len(msg.Link.Message.Body.Attachments) > 0 {
-				for _, attachment := range msg.Link.Message.Body.Attachments {
-					if attachment.Type == "audio" || attachment.Type == "voice" {
-						m.handleAudioAttachment(ctx, msg, attachment)
-						return
-					}
-					if attachment.Type == "video" {
-						m.handleVideoAttachment(ctx, msg, attachment)
-						return
-					}
-				}
+			if m.tryAttachments(ctx, msg, msg.Link.Message.Body.Attachments) {
+				return
 			}
 		}
 	}
@@ -460,36 +448,34 @@ func (m *MaxMessenger) handleUpdate(ctx context.Context, update *MaxUpdate) {
 		return
 	}
 
-	for _, attachment := range msg.Body.Attachments {
-		if m.debug {
-			slog.Debug("Attachment", "type", attachment.Type)
-		}
-		if attachment.Type == "audio" || attachment.Type == "voice" {
-			m.handleAudioAttachment(ctx, msg, attachment)
-			return
-		}
-		if attachment.Type == "video" {
-			m.handleVideoAttachment(ctx, msg, attachment)
-			return
-		}
+	if m.tryAttachments(ctx, msg, msg.Body.Attachments) {
+		return
 	}
 
-	if len(msg.Attachments) > 0 {
-		for _, attachment := range msg.Attachments {
-			if attachment.Type == "audio" || attachment.Type == "voice" {
-				m.handleAudioAttachment(ctx, msg, attachment)
-				return
-			}
-			if attachment.Type == "video" {
-				m.handleVideoAttachment(ctx, msg, attachment)
-				return
-			}
-		}
+	if m.tryAttachments(ctx, msg, msg.Attachments) {
+		return
 	}
 
 	if m.debug {
 		slog.Debug("No audio/voice/video attachments found")
 	}
+}
+
+func (m *MaxMessenger) tryAttachments(ctx context.Context, msg *MaxMessage, attachments []MaxAttachment) bool {
+	for _, attachment := range attachments {
+		if m.debug {
+			slog.Debug("Attachment", "type", attachment.Type)
+		}
+		if attachment.Type == "audio" || attachment.Type == "voice" {
+			m.handleAudioAttachment(ctx, msg, attachment)
+			return true
+		}
+		if attachment.Type == "video" {
+			m.handleVideoAttachment(ctx, msg, attachment)
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {

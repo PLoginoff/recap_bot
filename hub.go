@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"time"
 )
 
@@ -119,7 +120,7 @@ func (h *Hub) sendStatusForTask(ctx context.Context, task *Task, bot *Bot, statu
 func (h *Hub) HandleEvent(ctx context.Context, event *IncomingEvent) {
 	bot, ok := h.bots[event.BotID]
 	if !ok {
-		log.Printf("No bot found for ID %s", event.BotID)
+		slog.Warn("No bot found for event", "bot_id", event.BotID)
 		return
 	}
 	if !bot.CheckRateLimit(ctx, event) {
