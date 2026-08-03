@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -84,6 +85,35 @@ func convertMP3ToOGG(ctx context.Context, ffmpegPath string, audioData []byte) (
 
 func convertVideoNote(ctx context.Context, ffmpegPath string, audioData []byte) ([]byte, error) {
 	return convertToOGG(ctx, ffmpegPath, audioData)
+}
+
+// ffprobePathFromFFmpeg derives ffprobe path from ffmpeg path.
+func ffprobePathFromFFmpeg(ffmpegPath string) string {
+	dir := filepath.Dir(ffmpegPath)
+	base := filepath.Base(ffmpegPath)
+	if base == "ffmpeg" {
+		return filepath.Join(dir, "ffprobe")
+	}
+	return strings.Replace(ffmpegPath, "ffmpeg", "ffprobe", 1)
+}
+
+// ffprobeDuration returns media duration from URL or file path using ffprobe.
+func ffprobeDuration(ctx context.Context, ffprobePath string, url string) (int, error) {
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		url,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe failed: %w", err)
+	}
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe parse failed: %w", err)
+	}
+	return int(seconds), nil
 }
 
 func saveDebugAudio(taskID string, audioData []byte, messengerType MessengerType) {

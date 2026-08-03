@@ -28,6 +28,7 @@ type IncomingEvent struct {
 	// Transport flags filled by messenger
 	Messenger MessengerType `json:"messenger"`
 	IsMP3     bool          `json:"is_mp3"`
+	Duration  int           `json:"duration"` // seconds, 0 if unknown
 }
 
 type EventHandler func(ctx context.Context, event *IncomingEvent)

@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Recognizer     string               `yaml:"recognizer" default:"sber"`
 	Sber           ConfigSber           `yaml:"sber"`
+	Yandex         ConfigYandex         `yaml:"yandex"`
 	Openrouter     ConfigOpenrouter     `yaml:"openrouter"`
 	Prompts        ConfigPrompts        `yaml:"prompts"`
 	Messages       ConfigMessages       `yaml:"messages"`
@@ -22,6 +23,7 @@ type Config struct {
 	SaveDebugMedia bool                 `yaml:"save_debug_media" default:"false"`
 	Debug          bool                 `yaml:"debug" default:"false"`
 	StateFile      string               `yaml:"state_file" default:"state.txt"`
+	MaxDuration    time.Duration        `yaml:"max_duration" default:"0"` // 0 = no limit
 	Webhooks       ConfigWebhooks       `yaml:"webhooks"`
 	Bots           map[string]ConfigBot `yaml:"bots"`
 }
@@ -52,6 +54,14 @@ type ConfigSber struct {
 	} `yaml:"tokens"`
 }
 
+type ConfigYandex struct {
+	APIKey       string        `yaml:"api_key"`
+	FolderID     string        `yaml:"folder_id"`
+	Region       string        `yaml:"region"`        // "kz" (default) or "ru" — matches the cloud region where the folder lives
+	Model        string        `yaml:"model"`         // "general" (default) or "deferred-general"
+	PollInterval time.Duration `yaml:"poll_interval"` // operation status poll interval, default 5s
+}
+
 type ConfigOpenrouter struct {
 	APIKey string `yaml:"api_key"`
 	Models []struct {
@@ -66,12 +76,13 @@ type ConfigPrompts struct {
 }
 
 type ConfigMessages struct {
-	Listening        string `yaml:"listening" default:"Listening"`
-	StartMessage     string `yaml:"start" default:"Send me a voice message and I'll transcribe it for you!"`
-	ErrorMessage     string `yaml:"error" default:"An error occurred while processing your message. Please try again."`
-	FailureMessage   string `yaml:"failure" default:"Failed to transcribe the audio. Please check the audio quality and try again."`
-	RetryMessage     string `yaml:"retry" default:"Retrying..."`
-	RateLimitMessage string `yaml:"rate_limit" default:"Rate limit exceeded. Please try again later."`
+	Listening            string `yaml:"listening" default:"Listening"`
+	StartMessage         string `yaml:"start" default:"Send me a voice message and I'll transcribe it for you!"`
+	ErrorMessage         string `yaml:"error" default:"An error occurred while processing your message. Please try again."`
+	FailureMessage       string `yaml:"failure" default:"Failed to transcribe the audio. Please check the audio quality and try again."`
+	RetryMessage         string `yaml:"retry" default:"Retrying..."`
+	RateLimitMessage     string `yaml:"rate_limit" default:"Rate limit exceeded. Please try again later."`
+	DurationLimitMessage string `yaml:"duration_limit" default:"Message too long. Maximum duration: %s"`
 }
 
 type ConfigRateLimit struct {

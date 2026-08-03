@@ -45,9 +45,10 @@ type Hub struct {
 	ffmpegPath     string
 	saveDebugMedia bool
 	webhookServer  *WebhookServer
+	maxDuration    time.Duration
 }
 
-func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, ffmpegPath string, saveDebugMedia bool, webhookServer *WebhookServer) (*Hub, error) {
+func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient *OpenRouterClient, ffmpegPath string, saveDebugMedia bool, webhookServer *WebhookServer, maxDuration time.Duration) (*Hub, error) {
 	taskQueue := make(chan *Task, 100)
 	return &Hub{
 		bots:           bots,
@@ -57,6 +58,7 @@ func NewHub(bots map[string]*Bot, recognizer SpeechRecognizer, openrouterClient 
 		ffmpegPath:     ffmpegPath,
 		saveDebugMedia: saveDebugMedia,
 		webhookServer:  webhookServer,
+		maxDuration:    maxDuration,
 	}, nil
 }
 
@@ -124,6 +126,11 @@ func (h *Hub) HandleEvent(ctx context.Context, event *IncomingEvent) {
 		return
 	}
 	if !bot.CheckRateLimit(ctx, event) {
+		return
+	}
+
+	if h.maxDuration > 0 && event.Duration > 0 && time.Duration(event.Duration)*time.Second > h.maxDuration {
+		bot.SendStatus(ctx, event.ChatID, event.MessageID, fmt.Sprintf(bot.Messages.DurationLimitMessage, formatDuration(h.maxDuration)))
 		return
 	}
 
@@ -249,4 +256,12 @@ func (h *Hub) notifyFailure(ctx context.Context, task *Task) {
 			log.Printf("Failed to notify failure: %v", err)
 		}
 	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d сек", int(d.Seconds()))
+	}
+	minutes := int(d.Minutes())
+	return fmt.Sprintf("%d мин", minutes)
 }

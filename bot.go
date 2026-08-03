@@ -19,7 +19,7 @@ type Bot struct {
 
 // NewBot creates a new bot instance with embedded messenger client.
 
-func NewBot(id string, cfg ConfigBot, globalMessages ConfigMessages, hub *Hub, rateLimiter RateLimiter, debug bool) *Bot {
+func NewBot(id string, cfg ConfigBot, globalMessages ConfigMessages, hub *Hub, rateLimiter RateLimiter, debug bool, ffprobePath string) *Bot {
 	bot := &Bot{
 		ID:          id,
 		Prompt:      cfg.Prompt,
@@ -36,7 +36,7 @@ func NewBot(id string, cfg ConfigBot, globalMessages ConfigMessages, hub *Hub, r
 		if hub != nil {
 			webhookServer = hub.webhookServer
 		}
-		bot.messenger = NewMaxMessenger(cfg.Token, globalMessages, bot.HandleEvent, debug, webhookServer, cfg.WebhookPath)
+		bot.messenger = NewMaxMessenger(cfg.Token, globalMessages, bot.HandleEvent, debug, ffprobePath, webhookServer, cfg.WebhookPath)
 	default:
 		log.Fatalf("Unknown messenger type: %s", cfg.Messenger)
 	}

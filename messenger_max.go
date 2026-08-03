@@ -36,6 +36,7 @@ type MaxMessenger struct {
 	httpClient     *http.Client
 	downloadClient *http.Client
 	debug          bool
+	ffprobePath    string
 
 	// Webhook mode
 	webhookServer *WebhookServer
@@ -49,7 +50,7 @@ type MaxMessenger struct {
 
 // NewMaxMessenger creates a Max messenger. If webhookServer and webhookPath are provided,
 // it runs in webhook mode; otherwise falls back to long polling.
-func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHandler, debug bool, webhookServer *WebhookServer, webhookPath string) *MaxMessenger {
+func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHandler, debug bool, ffprobePath string, webhookServer *WebhookServer, webhookPath string) *MaxMessenger {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: maxSkipTLSVerify},
 	}
@@ -66,6 +67,7 @@ func NewMaxMessenger(token string, messages ConfigMessages, eventHandler EventHa
 			Timeout:   maxDownloadTimeout,
 			Transport: transport,
 		},
+		ffprobePath:   ffprobePath,
 		webhookServer: webhookServer,
 		webhookPath:   webhookPath,
 		seenMids:      make(map[string]time.Time),
@@ -485,6 +487,14 @@ func (m *MaxMessenger) handleStart(ctx context.Context, msg *MaxMessage) {
 }
 
 func (m *MaxMessenger) handleAudioAttachment(ctx context.Context, msg *MaxMessage, attachment MaxAttachment) {
+	duration := 0
+	if m.ffprobePath != "" {
+		var err error
+		duration, err = ffprobeDuration(ctx, m.ffprobePath, attachment.Payload.URL)
+		if err != nil && m.debug {
+			slog.Debug("ffprobe failed for audio", "error", err)
+		}
+	}
 	event := &IncomingEvent{
 		Type:      EventIncomingVoice,
 		ChatID:    strconv.FormatInt(msg.Recipient.ChatID, 10),
@@ -494,11 +504,20 @@ func (m *MaxMessenger) handleAudioAttachment(ctx context.Context, msg *MaxMessag
 		Timestamp: time.Now(),
 		Messenger: MessengerMax,
 		IsMP3:     true,
+		Duration:  duration,
 	}
 	m.eventHandler(ctx, event)
 }
 
 func (m *MaxMessenger) handleVideoAttachment(ctx context.Context, msg *MaxMessage, attachment MaxAttachment) {
+	duration := 0
+	if m.ffprobePath != "" {
+		var err error
+		duration, err = ffprobeDuration(ctx, m.ffprobePath, attachment.Payload.URL)
+		if err != nil && m.debug {
+			slog.Debug("ffprobe failed for video", "error", err)
+		}
+	}
 	event := &IncomingEvent{
 		Type:      EventIncomingVideo,
 		ChatID:    strconv.FormatInt(msg.Recipient.ChatID, 10),
@@ -508,6 +527,7 @@ func (m *MaxMessenger) handleVideoAttachment(ctx context.Context, msg *MaxMessag
 		Timestamp: time.Now(),
 		Messenger: MessengerMax,
 		IsMP3:     false,
+		Duration:  duration,
 	}
 	m.eventHandler(ctx, event)
 }

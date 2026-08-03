@@ -271,6 +271,7 @@ func (tc *TelegramMessenger) handleVoiceMessage(ctx context.Context, bot *telegr
 		Timestamp: time.Now(),
 		Messenger: MessengerTelegram,
 		IsMP3:     false, // Telegram sends OGG
+		Duration:  voice.Duration,
 	}
 	tc.eventHandler(ctx, event)
 }
@@ -293,6 +294,7 @@ func (tc *TelegramMessenger) handleVideoNote(ctx context.Context, bot *telegramb
 		Timestamp: time.Now(),
 		Messenger: MessengerTelegram,
 		IsMP3:     false, // Video notes are MP4
+		Duration:  video.Duration,
 	}
 	tc.eventHandler(ctx, event)
 }

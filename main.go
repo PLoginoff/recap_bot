@@ -71,6 +71,21 @@ func main() {
 			Tokens: tokens,
 		}
 		recognizer = NewSberClient(sberConfig, stateStore)
+	case "yandex":
+		if config.Yandex.APIKey == "" {
+			log.Fatalf("No Yandex api_key provided in config")
+		}
+		if config.Yandex.FolderID == "" {
+			log.Fatalf("No Yandex folder_id provided in config")
+		}
+		yandexConfig := YandexConfig{
+			APIKey:       config.Yandex.APIKey,
+			FolderID:     config.Yandex.FolderID,
+			Region:       config.Yandex.Region,
+			Model:        config.Yandex.Model,
+			PollInterval: config.Yandex.PollInterval,
+		}
+		recognizer = NewYandexClient(yandexConfig)
 	default:
 		log.Fatalf("Unknown recognizer type: %s", config.Recognizer)
 	}
@@ -105,8 +120,10 @@ func main() {
 		}
 	}
 
+	ffprobePath := ffprobePathFromFFmpeg(config.FFmpegPath)
+
 	// Create hub (EventSink)
-	hub, err := NewHub(nil, recognizer, openrouterClient, config.FFmpegPath, config.SaveDebugMedia, webhookServer)
+	hub, err := NewHub(nil, recognizer, openrouterClient, config.FFmpegPath, config.SaveDebugMedia, webhookServer, config.MaxDuration)
 	if err != nil {
 		log.Fatalf("Failed to create hub: %v", err)
 	}
@@ -115,7 +132,7 @@ func main() {
 	bots := make(map[string]*Bot)
 
 	for botID, botConfig := range config.Bots {
-		bot := NewBot(botID, botConfig, config.Messages, hub, rateLimiter, config.Debug)
+		bot := NewBot(botID, botConfig, config.Messages, hub, rateLimiter, config.Debug, ffprobePath)
 		bots[botID] = bot
 		log.Printf("Configured %s bot: %s", botConfig.Messenger, botConfig.ID)
 	}

@@ -1,3 +1,11 @@
+debug: false
+
+webhooks:
+  listen: :8443
+  tls_cert: webhook.crt
+  tls_key: webhook.key
+  public_url: https://xxx:8443
+
 bots:
   recap:
     messenger: telegram
@@ -48,13 +56,7 @@ bots:
       Цель: создать единый, грамотный текст, который максимально точно передает
       всё сказанное, используя преимущества обоих вариантов распознавания.
 
-# Global webhook settings. Required only if any Max bot uses webhook_path.
-webhooks:
-  listen: :8443 # port for the shared webhook server
-  tls_cert: webhook.crt # path to certificate (self-signed works)
-  tls_key: webhook.key # path to private key
-  secret: optional-secret # X-Max-Bot-Api-Secret header
-  public_url: https://77.246.247.130:8443 # URL visible to Max API
+recognizer: yandex
 
 sber:
   tokens:
@@ -66,6 +68,13 @@ sber:
       client_secret: YOUR_SBER_CREDENTIAL_2
       cooldown: 15m
       limit: 20m
+
+yandex:
+  api_key: YOUR_YANDEX_API_KEY
+  folder_id: YOUR_YANDEX_FOLDER_ID
+  region: kz            # kz | ru — must match the region of your folder
+  model: general        # general | deferred-general (cheaper, slower)
+  poll_interval: 5s     # operation status poll interval
 
 openrouter:
   api_key: YOUR_OPENROUTER_API_KEY
@@ -100,6 +109,9 @@ messages:
   error: Произошла ошибка при обработке голосового сообщения. Попробуйте еще раз
   failure: 😞 Не удалось обработать сообщение. Попробуй, пожалуйста, ещё раз позже
   retry: 🤔 Пока не сдаюсь, ещё чуть-чуть
+  duration_limit: 'Сообщение слишком длинное. Максимальная длительность: %s'
+
+max_duration: 10m
 
 rate_limit:
   max_requests: 10
